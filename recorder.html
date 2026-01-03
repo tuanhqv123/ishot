@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      background: transparent !important;
+      overflow: hidden;
+      -webkit-user-select: none;
+      user-select: none;
+      width: 100%;
+      height: 100%;
+    }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 100%;
+    }
+    .container {
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      background: rgba(40, 40, 40, 0.95);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-radius: 10px;
+      padding: 16px 20px;
+      color: #fff;
+      text-align: center;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .keys {
+      font-size: 22px;
+      font-weight: 500;
+      letter-spacing: 1px;
+      min-height: 28px;
+      margin-bottom: 8px;
+    }
+    .keys.waiting { color: rgba(255,255,255,0.5); }
+    .hint {
+      font-size: 11px;
+      color: rgba(255,255,255,0.4);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="keys waiting" id="keys">Type shortcut</div>
+    <div class="hint">Press ⌘/⇧/⌥/⌃ + key • Esc to cancel</div>
+  </div>
+
+  <script type="module">
+    import { emit } from 'https://unpkg.com/@tauri-apps/api@2/event';
+    import { getCurrentWindow } from 'https://unpkg.com/@tauri-apps/api@2/window';
+    
+    const keysEl = document.getElementById('keys');
+    let currentMods = 0;
+    let currentKey = '';
+    
+    function updateDisplay() {
+      let symbols = [];
+      if (currentMods & 1) symbols.push('⌘');
+      if (currentMods & 2) symbols.push('⇧');
+      if (currentMods & 4) symbols.push('⌥');
+      if (currentMods & 8) symbols.push('⌃');
+      if (currentKey) symbols.push(currentKey);
+      
+      if (symbols.length > 0) {
+        keysEl.textContent = symbols.join('');
+        keysEl.classList.remove('waiting');
+      } else {
+        keysEl.textContent = 'Type shortcut';
+        keysEl.classList.add('waiting');
+      }
+    }
+    
+    document.addEventListener('keydown', async (e) => {
+      e.preventDefault();
+      
+      if (e.key === 'Escape') {
+        await getCurrentWindow().close();
+        return;
+      }
+      
+      // Update modifiers
+      currentMods = 0;
+      if (e.metaKey) currentMods |= 1;
+      if (e.shiftKey) currentMods |= 2;
+      if (e.altKey) currentMods |= 4;
+      if (e.ctrlKey) currentMods |= 8;
+      
+      // Get key
+      currentKey = '';
+      if (e.code.startsWith('Key')) currentKey = e.code.replace('Key', '');
+      else if (e.code.startsWith('Digit')) currentKey = e.code.replace('Digit', '');
+      else if (e.code.startsWith('F') && e.code.length <= 3) currentKey = e.code;
+      else if (e.code === 'Space') currentKey = '␣';
+      
+      updateDisplay();
+      
+      // If we have modifiers + key, save it
+      if (currentKey && currentMods > 0) {
+        const keyForSave = currentKey === '␣' ? 'Space' : currentKey;
+        setTimeout(async () => {
+          await emit('set-shortcut', { modifiers: currentMods, key: keyForSave });
+        }, 150); // Small delay to show the combo
+      }
+    });
+    
+    document.addEventListener('keyup', (e) => {
+      // Update modifiers on release (but keep key if set)
+      let newMods = 0;
+      if (e.metaKey) newMods |= 1;
+      if (e.shiftKey) newMods |= 2;
+      if (e.altKey) newMods |= 4;
+      if (e.ctrlKey) newMods |= 8;
+      
+      // Only update if no valid combo was made
+      if (!currentKey || currentMods === 0) {
+        currentMods = newMods;
+        if (newMods === 0) currentKey = '';
+        updateDisplay();
+      }
+    });
+    
+    // Close on click outside (blur)
+    window.addEventListener('blur', async () => {
+      await getCurrentWindow().close();
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,160 @@
+/// Test file to verify screenshots crate works correctly
+/// Run with: cargo test --test screenshot_test
+
+use screenshots::Screen;
+use std::path::PathBuf;
+
+#[test]
+fn test_get_all_screens() {
+    println!("=== Test: Get All Screens ===");
+    match Screen::all() {
+        Ok(screens) => {
+            println!("Found {} screens", screens.len());
+            for (i, screen) in screens.iter().enumerate() {
+                let info = &screen.display_info;
+                println!("  Screen {}: x={}, y={}, width={}, height={}, scale_factor={}",
+                    i, info.x, info.y, info.width, info.height, info.scale_factor);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error getting screens: {:?}", e);
+            panic!("Failed to get screens");
+        }
+    }
+}
+
+#[test]
+fn test_capture_main_screen() {
+    println!("\n=== Test: Capture Main Screen ===");
+
+    let screens = Screen::all().expect("Failed to get screens");
+    let main_screen = screens.first().expect("No screens found");
+
+    println!("Capturing screen...");
+    match main_screen.capture() {
+        Ok(screenshot) => {
+            println!("Success! Captured: {}x{}", screenshot.width(), screenshot.height());
+
+            // Save to test directory
+            let test_path = PathBuf::from("/tmp/ishot_test_capture.png");
+            match screenshot.save(&test_path) {
+                Ok(_) => println!("Saved to: {:?}", test_path),
+                Err(e) => eprintln!("Failed to save: {:?}", e)
+            }
+
+            // Verify file exists
+            assert!(test_path.exists(), "Screenshot file should exist");
+            let metadata = std::fs::metadata(&test_path).unwrap();
+            println!("File size: {} bytes", metadata.len());
+            assert!(metadata.len() > 0, "Screenshot should not be empty");
+        }
+        Err(e) => {
+            eprintln!("Failed to capture: {:?}", e);
+            panic!("Screen capture failed");
+        }
+    }
+}
+
+#[test]
+fn test_capture_region() {
+    println!("\n=== Test: Capture Region ===");
+
+    let screens = Screen::all().expect("Failed to get screens");
+    let main_screen = screens.first().expect("No screens found");
+
+    // Capture 400x300 region from center
+    let info = &main_screen.display_info;
+    let region_width = 400u32;
+    let region_height = 300u32;
+    let x = ((info.width as i32) - (region_width as i32)) / 2;
+    let y = ((info.height as i32) - (region_height as i32)) / 2;
+
+    println!("Capturing region: x={}, y={}, width={}, height={}", x, y, region_width, region_height);
+
+    match main_screen.capture_area(x, y, region_width, region_height) {
+        Ok(screenshot) => {
+            println!("Success! Captured region: {}x{}", screenshot.width(), screenshot.height());
+
+            let test_path = PathBuf::from("/tmp/ishot_test_region.png");
+            match screenshot.save(&test_path) {
+                Ok(_) => println!("Saved to: {:?}", test_path),
+                Err(e) => eprintln!("Failed to save: {:?}", e)
+            }
+
+            assert!(test_path.exists(), "Region screenshot file should exist");
+            assert_eq!(screenshot.width(), region_width, "Width should match");
+            assert_eq!(screenshot.height(), region_height, "Height should match");
+        }
+        Err(e) => {
+            eprintln!("Failed to capture region: {:?}", e);
+            panic!("Region capture failed");
+        }
+    }
+}
+
+#[test]
+fn test_get_bytes_directly() {
+    println!("\n=== Test: Get Bytes Directly (without temp file) ===");
+
+    let screens = Screen::all().expect("Failed to get screens");
+    let main_screen = screens.first().expect("No screens found");
+
+    match main_screen.capture() {
+        Ok(screenshot) => {
+            // Try to get bytes directly using image crate
+            use std::io::Cursor;
+
+            // Create DynamicImage from screenshot
+            let width = screenshot.width();
+            let height = screenshot.height();
+            let raw_data = screenshot.to_vec();
+
+            println!("Raw data: {} bytes ({}x{} = {} pixels)",
+                raw_data.len(),
+                width,
+                height,
+                width * height
+            );
+
+            // Save using image crate's write_to
+            let mut buffer = Cursor::new(Vec::new());
+            {
+                let image_ref: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+                    image::ImageBuffer::from_raw(width, height, raw_data)
+                    .expect("Failed to create image buffer");
+
+                let dynamic_image = image::DynamicImage::ImageRgba8(image_ref);
+
+                match dynamic_image.write_to(&mut buffer, image::ImageFormat::Png) {
+                    Ok(_) => {
+                        let png_bytes = buffer.into_inner();
+                        println!("PNG bytes: {} bytes", png_bytes.len());
+                        assert!(png_bytes.len() > 0, "PNG should not be empty");
+
+                        // Save to verify
+                        let test_path = PathBuf::from("/tmp/ishot_test_direct.png");
+                        std::fs::write(&test_path, png_bytes).expect("Failed to write");
+                        println!("Saved to: {:?}", test_path);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to encode PNG: {:?}", e);
+                        panic!("PNG encoding failed");
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to capture: {:?}", e);
+            panic!("Screen capture failed");
+        }
+    }
+}
+
+fn main() {
+    println!("Running screenshot tests...\n");
+    test_get_all_screens();
+    test_capture_main_screen();
+    test_capture_region();
+    test_get_bytes_directly();
+    println!("\n=== All tests passed! ===");
+}

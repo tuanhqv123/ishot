@@ -1,0 +1,74 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "productName": "iShot",
+  "version": "0.1.0",
+  "identifier": "com.ishot.screenshot",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "iShot",
+        "width": 1,
+        "height": 1,
+        "visible": false,
+        "decorations": false,
+        "resizable": false,
+        "skipTaskbar": true
+      },
+      {
+        "label": "overlay",
+        "title": "Screenshot",
+        "transparent": true,
+        "width": 1920,
+        "height": 1080,
+        "x": 0,
+        "y": 0,
+        "alwaysOnTop": true,
+        "decorations": false,
+        "resizable": false,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "category": "public.app-category.graphics-design",
+    "shortDescription": "Screenshot tool",
+    "longDescription": "A lightweight screenshot tool for macOS",
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "entitlements": "./entitlements.plist",
+      "signingIdentity": "-",
+      "dmg": {
+        "appPosition": { "x": 180, "y": 170 },
+        "applicationFolderPosition": { "x": 480, "y": 170 },
+        "windowSize": { "width": 660, "height": 400 }
+      }
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

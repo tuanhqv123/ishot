@@ -1,4 +1,4 @@
-use crate::services::screen_capture::ScreenCaptureService;
+use crate::services::screen_capture::{ScreenCaptureService, MonitorInfo};
 
 #[derive(serde::Serialize)]
 pub struct ScreenshotResult {
@@ -11,7 +11,7 @@ pub struct ScreenshotResult {
 #[tauri::command]
 pub async fn capture_screen() -> std::result::Result<ScreenshotResult, String> {
     let start = std::time::Instant::now();
-    let (data, width, height) = ScreenCaptureService::capture_main_display()
+    let (data, width, height) = ScreenCaptureService::capture_all_displays()
         .map_err(|e: crate::error::AppError| e.to_string())?;
     println!("Captured {}x{} in {:?}", width, height, start.elapsed());
     Ok(ScreenshotResult { data, width, height })
@@ -32,5 +32,12 @@ pub async fn capture_region(
 #[tauri::command]
 pub async fn get_display_bounds() -> std::result::Result<(f64, f64, f64, f64), String> {
     ScreenCaptureService::get_display_bounds()
+        .map_err(|e: crate::error::AppError| e.to_string())
+}
+
+/// Get info for all online monitors
+#[tauri::command]
+pub async fn get_monitors_info() -> std::result::Result<Vec<MonitorInfo>, String> {
+    ScreenCaptureService::get_monitors_info()
         .map_err(|e: crate::error::AppError| e.to_string())
 }

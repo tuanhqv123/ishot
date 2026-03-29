@@ -1,14 +1,27 @@
 import { useEffect, useState, useRef, useCallback } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  Square, Circle, ArrowRight, Minus, Pencil, Grid3X3,
+  ScanText, Type, Download, X, Check, Undo2, Languages
+} from "lucide-react";
+
+// Detect which monitor this window belongs to based on label
+function getWindowMonitorIndex(): number {
+  const label = getCurrentWindow().label;
+  const match = label.match(/^overlay_(\d+)$/);
+  return match ? parseInt(match[1]) : 0;
+}
 
 interface Region { x: number; y: number; width: number; height: number; }
 interface TextBlock { text: string; x: number; y: number; width: number; height: number; confidence: number; }
+interface MonitorInfo { x: number; y: number; width: number; height: number; scale_factor: number; }
+
 
 interface Annotation {
   id: number;
-  type: "rect" | "oval" | "arrow" | "line" | "draw" | "blur";
+  type: "rect" | "oval" | "arrow" | "line" | "draw" | "blur" | "textbox";
   x: number; y: number;
   w?: number; h?: number;
   ex?: number; ey?: number;
@@ -16,17 +29,25 @@ interface Annotation {
   blurStrength?: number;
   blurMode?: "rect" | "draw";
   color?: string;
+  text?: string;
+  fontSize?: number;
+  strokeWidth?: number;
+  bold?: boolean;
+  underline?: boolean;
 }
 
+interface DisplayCapture { data: string; width: number; height: number; monitor: MonitorInfo; }
+
 type Stage = "idle" | "selecting" | "editing";
-type Tool = "rect" | "oval" | "arrow" | "line" | "draw" | "blur" | "text" | null;
+type Tool = "rect" | "oval" | "arrow" | "line" | "draw" | "blur" | "text" | "textbox" | null;
 
 let annotationId = 0;
 
 function App() {
   const [stage, setStage] = useState<Stage>("idle");
-  const [capturedImage, setCapturedImage] = useState("");
+  const [displayCaptures, setDisplayCaptures] = useState<DisplayCapture[]>([]);
   const [imgDims, setImgDims] = useState({ w: 0, h: 0 });
+  const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [selection, setSelection] = useState<Region | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -40,11 +61,17 @@ function App() {
   const [selectedAnnotation, setSelectedAnnotation] = useState<number | null>(null);
   const [blurStrength, setBlurStrength] = useState(10);
   const [tempBlur, setTempBlur] = useState<Region | null>(null);
+  const [fontSize, setFontSize] = useState(() => Number(localStorage.getItem("ishot-fontsize")) || 16);
+  const [fontBold, setFontBold] = useState(false);
+  const [fontUnderline, setFontUnderline] = useState(false);
+  const [strokeWidth, setStrokeWidth] = useState(2);
+  const [editingTextId, setEditingTextId] = useState<number | null>(null);
+  const [shiftHeld, setShiftHeld] = useState(false);
+  const [lockedByOther, setLockedByOther] = useState(false);
   
   // Color picker
-  const COLORS = ["#ff0000", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#af52de", "#000000"];
+  const COLORS = ["#ff0000", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#af52de", "#000000", "#ffffff"];
   const [strokeColor, setStrokeColor] = useState(() => localStorage.getItem("ishot-color") || "#ff0000");
-  const [showColorPicker, setShowColorPicker] = useState(false);
   
   // OCR
   const [textBlocks, setTextBlocks] = useState<TextBlock[]>([]);
@@ -55,13 +82,17 @@ function App() {
   const textSelectionStart = useRef<{ x: number; y: number } | null>(null);
   const textSelectionRect = useRef<Region | null>(null);
 
-  const cancelCapture = useCallback(async () => {
-    setCapturedImage(""); setSelection(null); setStage("idle"); setIsDragging(false);
+  const resetState = useCallback(() => {
+    setDisplayCaptures([]); setSelection(null); setStage("idle"); setIsDragging(false);
     setAnnotations([]); setTextBlocks([]); setSelectedText(""); setSelectedBlockIndices(new Set());
     setOcrLoading(false); setSelectedAnnotation(null); setTool(null); setTempBlur(null);
-    setShowColorPicker(false);
-    dragStartRef.current = null;
-    try { await getCurrentWindow().hide(); } catch (e) { console.error(e); }
+    setTranslatedText(""); setTranslateLoading(false); setShowTranslate(false);
+    setLockedByOther(false); dragStartRef.current = null;
+  }, []);
+
+  const cancelCapture = useCallback(async () => {
+    resetState();
+    try { await invoke("hide_overlay"); } catch (e) { console.error(e); }
   }, []);
 
   // Simple box blur implementation
@@ -105,28 +136,39 @@ function App() {
     }
   };
 
+  // Get this window's display capture
+  const findDisplay = useCallback((): DisplayCapture | null => {
+    return displayCaptures[getWindowMonitorIndex()] || null;
+  }, [displayCaptures]);
+
   const renderFinalImage = useCallback(async (): Promise<Uint8Array | null> => {
-    if (!capturedImage || !selection) return null;
+    if (displayCaptures.length === 0 || !selection) return null;
+    const dc = findDisplay();
+    if (!dc) return null;
+
     const canvas = document.createElement("canvas");
-    const img = new Image(); img.src = capturedImage;
+    const img = new Image(); img.src = `data:image/png;base64,${dc.data}`;
     await new Promise(r => img.onload = r);
-    const scaleX = img.naturalWidth / window.innerWidth;
-    const scaleY = img.naturalHeight / window.innerHeight;
-    const sw = Math.round(selection.width * scaleX);
-    const sh = Math.round(selection.height * scaleY);
+
+    const scale = dc.monitor.scale_factor;
+    // Selection coords are window-relative, map directly to display image
+    const sx = selection.x * scale;
+    const sy = selection.y * scale;
+    const sw = Math.round(selection.width * scale);
+    const sh = Math.round(selection.height * scale);
     canvas.width = sw; canvas.height = sh;
     const ctx = canvas.getContext("2d")!;
-    ctx.drawImage(img, selection.x * scaleX, selection.y * scaleY, sw, sh, 0, 0, sw, sh);
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
 
     // Apply blur using box blur algorithm
     for (const ann of annotations) {
       if (ann.type === "blur" && ann.w && ann.h) {
-        const strength = Math.round((ann.blurStrength || 10) * Math.max(scaleX, scaleY) / 2);
-        const bx = Math.round(Math.min(ann.x, ann.x + ann.w) * scaleX);
-        const by = Math.round(Math.min(ann.y, ann.y + ann.h) * scaleY);
-        const bw = Math.round(Math.abs(ann.w) * scaleX);
-        const bh = Math.round(Math.abs(ann.h) * scaleY);
-        
+        const strength = Math.round((ann.blurStrength || 10) * scale / 2);
+        const bx = Math.round(Math.min(ann.x, ann.x + ann.w) * scale);
+        const by = Math.round(Math.min(ann.y, ann.y + ann.h) * scale);
+        const bw = Math.round(Math.abs(ann.w) * scale);
+        const bh = Math.round(Math.abs(ann.h) * scale);
+
         if (bw > 0 && bh > 0) {
           const imageData = ctx.getImageData(bx, by, bw, bh);
           applyBoxBlur(imageData, strength);
@@ -136,12 +178,33 @@ function App() {
     }
 
     if (canvasRef.current) ctx.drawImage(canvasRef.current, 0, 0, selection.width, selection.height, 0, 0, sw, sh);
+
+    // Draw textbox annotations
+    for (const ann of annotations) {
+      if (ann.type === "textbox" && ann.text && ann.w && ann.h) {
+        const fs = (ann.fontSize || 16) * scale;
+        ctx.fillStyle = ann.color || "#ff0000";
+        ctx.font = `${ann.bold ? "bold " : ""}${fs}px sans-serif`;
+        ctx.textBaseline = "top";
+        const lines = ann.text.split("\n");
+        const lineH = fs * 1.3;
+        for (let li = 0; li < lines.length; li++) {
+          const tx = ann.x * scale, ty = (ann.y + 2) * scale + li * lineH;
+          ctx.fillText(lines[li], tx, ty, ann.w * scale);
+          if (ann.underline) {
+            const metrics = ctx.measureText(lines[li]);
+            ctx.fillRect(tx, ty + fs * 1.1, Math.min(metrics.width, ann.w * scale), Math.max(1, fs / 12));
+          }
+        }
+      }
+    }
+
     const base64 = canvas.toDataURL("image/png").split(",")[1];
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return bytes;
-  }, [capturedImage, selection, annotations]);
+  }, [displayCaptures, selection, annotations, findDisplay]);
 
   const handleDone = useCallback(async () => {
     const bytes = await renderFinalImage();
@@ -153,6 +216,12 @@ function App() {
     if (bytes) { try { await invoke("save_to_file", { imageBytes: Array.from(bytes) }); await cancelCapture(); } catch(e) { console.error(e); } }
   }, [renderFinalImage, cancelCapture]);
 
+  const handleUndo = useCallback(() => {
+    setAnnotations(prev => prev.slice(0, -1));
+    setSelectedAnnotation(null);
+    setEditingTextId(null);
+  }, []);
+
   const deleteSelectedAnnotation = useCallback(() => {
     if (selectedAnnotation !== null) {
       setAnnotations(prev => prev.filter(a => a.id !== selectedAnnotation));
@@ -161,47 +230,110 @@ function App() {
   }, [selectedAnnotation]);
 
   const performOcr = useCallback(async () => {
-    if (!capturedImage || !selection || ocrLoading) return;
+    if (displayCaptures.length === 0 || !selection || ocrLoading) return;
     setOcrLoading(true);
     try {
+      const dc = findDisplay();
+      if (!dc) return;
+
       const canvas = document.createElement("canvas");
-      const img = new Image(); img.src = capturedImage;
+      const img = new Image(); img.src = `data:image/png;base64,${dc.data}`;
       await new Promise(r => img.onload = r);
-      const scaleX = img.naturalWidth / window.innerWidth;
-      const scaleY = img.naturalHeight / window.innerHeight;
-      canvas.width = Math.round(selection.width * scaleX);
-      canvas.height = Math.round(selection.height * scaleY);
+      const scale = dc.monitor.scale_factor;
+      const sx = selection.x * scale;
+      const sy = selection.y * scale;
+      canvas.width = Math.round(selection.width * scale);
+      canvas.height = Math.round(selection.height * scale);
       const ctx = canvas.getContext("2d")!;
-      ctx.drawImage(img, selection.x * scaleX, selection.y * scaleY, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, sx, sy, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
       const base64 = canvas.toDataURL("image/png").split(",")[1];
       const binary = atob(base64);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
       const result = await invoke<{blocks: TextBlock[]}>("perform_ocr", { pngData: Array.from(bytes) });
-      setTextBlocks(result.blocks.map(b => ({ ...b, x: b.x / scaleX, y: b.y / scaleY, width: b.width / scaleX, height: b.height / scaleY })));
+      setTextBlocks(result.blocks.map(b => ({ ...b, x: b.x / scale, y: b.y / scale, width: b.width / scale, height: b.height / scale })));
     } catch (e) { console.error(e); }
     finally { setOcrLoading(false); }
-  }, [capturedImage, selection, ocrLoading]);
+  }, [displayCaptures, selection, ocrLoading, findDisplay]);
+
+  const [translatedText, setTranslatedText] = useState("");
+  const [translateLoading, setTranslateLoading] = useState(false);
+  const [showTranslate, setShowTranslate] = useState(false);
+
+  const handleTranslate = useCallback(async () => {
+    if (displayCaptures.length === 0 || !selection || translateLoading) return;
+    setTranslateLoading(true);
+    setShowTranslate(true);
+    setTranslatedText("");
+    try {
+      // OCR the selection first
+      const dc = findDisplay();
+      if (!dc) return;
+      const canvas = document.createElement("canvas");
+      const img = new Image(); img.src = `data:image/png;base64,${dc.data}`;
+      await new Promise(r => img.onload = r);
+      const s = dc.monitor.scale_factor;
+      canvas.width = Math.round(selection.width * s);
+      canvas.height = Math.round(selection.height * s);
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, selection.x * s, selection.y * s, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+      const base64 = canvas.toDataURL("image/png").split(",")[1];
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const ocrResult = await invoke<{blocks: {text: string}[], full_text: string}>("perform_ocr", { pngData: Array.from(bytes) });
+      const sourceText = ocrResult.full_text || ocrResult.blocks.map(b => b.text).join(" ");
+      if (!sourceText.trim()) { setTranslatedText("(No text detected)"); return; }
+      // Translate — auto-detect to English (or Vietnamese if source is English)
+      const targetLang = /^[a-zA-Z\s.,!?'"()-]+$/.test(sourceText) ? "vi" : "en";
+      const result = await invoke<{translated: string, source_lang: string, target_lang: string}>(
+        "translate_text", { text: sourceText, targetLang });
+      setTranslatedText(result.translated);
+    } catch (e) { setTranslatedText("Translation failed: " + e); }
+    finally { setTranslateLoading(false); }
+  }, [displayCaptures, selection, translateLoading, findDisplay]);
 
   const handleToolChange = useCallback((newTool: Tool) => {
-    setTool(newTool); setSelectedAnnotation(null); setShowColorPicker(false);
-    if (newTool === "text" && textBlocks.length === 0 && !ocrLoading) performOcr();
+    setTool(newTool); setSelectedAnnotation(null);    if (newTool === "text" && textBlocks.length === 0 && !ocrLoading) performOcr();
     if (newTool !== "text") { setSelectedText(""); setSelectedBlockIndices(new Set()); }
   }, [textBlocks.length, ocrLoading, performOcr]);
 
   useEffect(() => {
-    const unlisten = listen<{ data: string, width: number, height: number }>("screenshot-ready", (event) => {
-      const { data, width, height } = event.payload;
-      setCapturedImage(`data:image/png;base64,${data}`);
-      setImgDims({ w: width, h: height }); setStage("selecting"); setSelection(null);
+    const unlisten = listen<{ displays: DisplayCapture[], monitors: MonitorInfo[] }>("screenshot-ready", (event) => {
+      const { displays, monitors: mons } = event.payload;
+      setDisplayCaptures(displays);
+      setMonitors(mons || []);
+      if (displays.length > 0) {
+        setImgDims({ w: displays[0].width, h: displays[0].height });
+      }
+      setStage("selecting"); setSelection(null);
       setAnnotations([]); setTextBlocks([]); setSelectedText(""); setSelectedBlockIndices(new Set());
       setTool(null); setSelectedAnnotation(null); setTempBlur(null);
     });
     return () => { unlisten.then(fn => fn()); };
   }, []);
 
+  // Listen for cancel from any overlay window
+  useEffect(() => {
+    const unlisten = listen("cancel-capture", () => { resetState(); setLockedByOther(false); });
+    return () => { unlisten.then(fn => fn()); };
+  }, [resetState]);
+
+  // When another window enters editing, lock this window
+  useEffect(() => {
+    const unlisten = listen<{ label: string }>("selection-locked", (event) => {
+      if (event.payload.label !== getCurrentWindow().label) {
+        setLockedByOther(true);
+      }
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, []);
+
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
+      if (e.key === "Shift") setShiftHeld(true);
+      if (editingTextId !== null) return; // Don't intercept when typing in textbox
+      if ((e.metaKey || e.ctrlKey) && e.key === "z") { e.preventDefault(); handleUndo(); return; }
       if (e.key === "Escape") cancelCapture();
       else if ((e.metaKey || e.ctrlKey) && e.key === "c" && selectedText) {
         e.preventDefault(); await navigator.clipboard.writeText(selectedText); cancelCapture();
@@ -209,9 +341,13 @@ function App() {
         e.preventDefault(); deleteSelectedAnnotation();
       }
     };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Shift") setShiftHeld(false);
+    };
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [cancelCapture, selectedText, selectedAnnotation, deleteSelectedAnnotation]);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => { window.removeEventListener("keydown", handleKeyDown); window.removeEventListener("keyup", handleKeyUp); };
+  }, [cancelCapture, selectedText, selectedAnnotation, deleteSelectedAnnotation, editingTextId, handleUndo]);
 
   useEffect(() => {
     if (stage === "editing" && selection && canvasRef.current) {
@@ -228,11 +364,11 @@ function App() {
     ctx.lineCap = "round"; ctx.lineJoin = "round";
     
     for (const ann of annotations) {
-      if (ann.type === "blur") continue;
+      if (ann.type === "blur" || ann.type === "textbox") continue; // textbox rendered as HTML overlay
       const isSelected = ann.id === selectedAnnotation;
       ctx.strokeStyle = isSelected ? "#007aff" : (ann.color || "#ff0000");
-      ctx.lineWidth = isSelected ? 3 : 2;
-      
+      ctx.lineWidth = isSelected ? (ann.strokeWidth || 2) + 1 : (ann.strokeWidth || 2);
+
       if (ann.type === "rect" && ann.w !== undefined) {
         ctx.strokeRect(ann.x, ann.y, ann.w, ann.h!);
       } else if (ann.type === "oval" && ann.w !== undefined) {
@@ -279,7 +415,10 @@ function App() {
   const handleMouseUp = () => {
     if (stage === "selecting" && isDragging) {
       setIsDragging(false); dragStartRef.current = null;
-      if (selection && selection.width > 10 && selection.height > 10) { setStage("editing"); setTool(null); }
+      if (selection && selection.width > 10 && selection.height > 10) {
+        setStage("editing"); setTool(null);
+        emit("selection-locked", { label: getCurrentWindow().label });
+      }
       else setSelection(null);
     }
   };
@@ -383,26 +522,44 @@ function App() {
     setDrawStart({ x, y });
     
     if (tool === "draw") setCurrentPath([{ x, y }]);
-    else if (tool === "blur") setTempBlur({ x, y, width: 0, height: 0 });
+    else if (tool === "blur" || tool === "textbox") setTempBlur({ x, y, width: 0, height: 0 });
   };
+
+  // Constrain point with Shift: snap to 45° angles for line/arrow, square for rect, circle for oval
+  const constrainPoint = useCallback((sx: number, sy: number, ex: number, ey: number, toolType: string): { x: number; y: number } => {
+    if (!shiftHeld) return { x: ex, y: ey };
+    const dx = ex - sx, dy = ey - sy;
+    if (toolType === "rect" || toolType === "oval" || toolType === "blur" || toolType === "textbox") {
+      const size = Math.max(Math.abs(dx), Math.abs(dy));
+      return { x: sx + size * Math.sign(dx || 1), y: sy + size * Math.sign(dy || 1) };
+    }
+    if (toolType === "line" || toolType === "arrow") {
+      const angle = Math.atan2(dy, dx);
+      const snapped = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      return { x: sx + dist * Math.cos(snapped), y: sy + dist * Math.sin(snapped) };
+    }
+    return { x: ex, y: ey };
+  }, [shiftHeld]);
 
   const handleCanvasMouseMove = (e: React.MouseEvent) => {
     if (!isDrawing || !drawStart || !tool) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left, y = e.clientY - rect.top;
-    
-    if (tool === "blur") {
+    const rawX = e.clientX - rect.left, rawY = e.clientY - rect.top;
+    const { x, y } = constrainPoint(drawStart.x, drawStart.y, rawX, rawY, tool);
+
+    if (tool === "blur" || tool === "textbox") {
       setTempBlur({ x: Math.min(drawStart.x, x), y: Math.min(drawStart.y, y),
         width: Math.abs(x - drawStart.x), height: Math.abs(y - drawStart.y) });
       return;
     }
-    
-    if (tool === "draw") setCurrentPath(prev => [...prev, { x, y }]);
-    
+
+    if (tool === "draw") setCurrentPath(prev => [...prev, { x: rawX, y: rawY }]);
+
     redrawAnnotations();
     const ctx = canvasRef.current!.getContext("2d")!;
-    ctx.strokeStyle = strokeColor; ctx.lineWidth = 2; ctx.lineCap = "round";
-    
+    ctx.strokeStyle = strokeColor; ctx.lineWidth = strokeWidth; ctx.lineCap = "round";
+
     if (tool === "rect") ctx.strokeRect(drawStart.x, drawStart.y, x - drawStart.x, y - drawStart.y);
     else if (tool === "oval") {
       ctx.beginPath();
@@ -421,26 +578,30 @@ function App() {
     } else if (tool === "draw" && currentPath.length > 0) {
       ctx.beginPath(); ctx.moveTo(currentPath[0].x, currentPath[0].y);
       for (const p of currentPath) ctx.lineTo(p.x, p.y);
-      ctx.lineTo(x, y); ctx.stroke();
+      ctx.lineTo(rawX, rawY); ctx.stroke();
     }
   };
 
   const handleCanvasMouseUp = (e: React.MouseEvent) => {
     if (!isDrawing || !drawStart || !tool) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    const rawX = e.clientX - rect.left, rawY = e.clientY - rect.top;
+    const { x, y } = constrainPoint(drawStart.x, drawStart.y, rawX, rawY, tool);
     const id = ++annotationId;
-    
-    if (tool === "rect") setAnnotations(prev => [...prev, { id, type: "rect", x: drawStart.x, y: drawStart.y, w: x - drawStart.x, h: y - drawStart.y, color: strokeColor }]);
-    else if (tool === "oval") setAnnotations(prev => [...prev, { id, type: "oval", x: drawStart.x, y: drawStart.y, w: x - drawStart.x, h: y - drawStart.y, color: strokeColor }]);
-    else if (tool === "arrow") setAnnotations(prev => [...prev, { id, type: "arrow", x: drawStart.x, y: drawStart.y, ex: x, ey: y, color: strokeColor }]);
-    else if (tool === "line") setAnnotations(prev => [...prev, { id, type: "line", x: drawStart.x, y: drawStart.y, ex: x, ey: y, color: strokeColor }]);
-    else if (tool === "draw") setAnnotations(prev => [...prev, { id, type: "draw", x: 0, y: 0, path: [...currentPath, { x, y }], color: strokeColor }]);
+
+    if (tool === "rect") setAnnotations(prev => [...prev, { id, type: "rect", x: drawStart.x, y: drawStart.y, w: x - drawStart.x, h: y - drawStart.y, color: strokeColor, strokeWidth }]);
+    else if (tool === "oval") setAnnotations(prev => [...prev, { id, type: "oval", x: drawStart.x, y: drawStart.y, w: x - drawStart.x, h: y - drawStart.y, color: strokeColor, strokeWidth }]);
+    else if (tool === "arrow") setAnnotations(prev => [...prev, { id, type: "arrow", x: drawStart.x, y: drawStart.y, ex: x, ey: y, color: strokeColor, strokeWidth }]);
+    else if (tool === "line") setAnnotations(prev => [...prev, { id, type: "line", x: drawStart.x, y: drawStart.y, ex: x, ey: y, color: strokeColor, strokeWidth }]);
+    else if (tool === "draw") setAnnotations(prev => [...prev, { id, type: "draw", x: 0, y: 0, path: [...currentPath, { x: rawX, y: rawY }], color: strokeColor, strokeWidth }]);
     else if (tool === "blur" && tempBlur && tempBlur.width > 5 && tempBlur.height > 5) {
       setAnnotations(prev => [...prev, { id, type: "blur", x: tempBlur.x, y: tempBlur.y, w: tempBlur.width, h: tempBlur.height, blurStrength }]);
+    } else if (tool === "textbox" && tempBlur && tempBlur.width > 20 && tempBlur.height > 15) {
+      setAnnotations(prev => [...prev, { id, type: "textbox", x: tempBlur.x, y: tempBlur.y, w: tempBlur.width, h: tempBlur.height, color: strokeColor, text: "", fontSize, bold: fontBold, underline: fontUnderline }]);
+      setEditingTextId(id);
     }
-    
-    setTool(null);
+
+    if (tool !== "textbox") setTool(null);
     setIsDrawing(false); setDrawStart(null); setCurrentPath([]); setTempBlur(null);
   };
 
@@ -454,7 +615,22 @@ function App() {
   };
 
   if (stage === "idle") return <div style={{ width: "100vw", height: "100vh", background: "transparent" }} />;
-  const scale = imgDims.w > 0 ? imgDims.w / window.innerWidth : 2;
+
+  const myMonitorIndex = getWindowMonitorIndex();
+
+  // Locked by another window — just show screenshot + dim, no interaction
+  if (lockedByOther) {
+    const dc = displayCaptures[myMonitorIndex];
+    return (
+      <div style={{ position: "fixed", top: 0, left: 0, width: "100vw", height: "100vh" }}>
+        {dc && <img src={`data:image/png;base64,${dc.data}`} alt=""
+          style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "fill", pointerEvents: "none" }} />}
+        <div style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", background: "rgba(0,0,0,0.5)", pointerEvents: "none" }} />
+      </div>
+    );
+  }
+  const scale = monitors[myMonitorIndex]?.scale_factor || (imgDims.w > 0 ? imgDims.w / window.innerWidth : 2);
+
   
   const getHintText = () => {
     if (selectedAnnotation !== null) return "Press ⌫ to delete";
@@ -470,7 +646,13 @@ function App() {
       cursor: stage === "selecting" ? "crosshair" : (tool ? "crosshair" : "default"), userSelect: "none", overflow: "hidden" }}
       onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}>
       
-      {capturedImage && <img src={capturedImage} alt="" style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover", objectPosition: "top left", pointerEvents: "none" }} />}
+      {/* Render this monitor's screenshot filling the viewport */}
+      {displayCaptures[myMonitorIndex] && (
+        <img src={`data:image/png;base64,${displayCaptures[myMonitorIndex].data}`} alt=""
+          style={{ position: "absolute", left: 0, top: 0,
+            width: "100%", height: "100%",
+            objectFit: "fill", pointerEvents: "none" }} />
+      )}
       
       {stage === "selecting" && !selection && <div style={{ position: "absolute", top: 0, left: 0, width: "100vw", height: "100vh", background: "rgba(0,0,0,0.3)", pointerEvents: "none" }} />}
       
@@ -504,12 +686,41 @@ function App() {
             }} />
           ))}
           
-          {/* Temp blur while drawing */}
-          {tempBlur && tempBlur.width > 0 && (
+          {/* Textbox annotations */}
+          {annotations.filter(a => a.type === "textbox").map(ann => (
+            <div key={ann.id} onClick={() => { setSelectedAnnotation(ann.id); setEditingTextId(ann.id); }}
+              style={{ position: "absolute",
+                left: selection.x + ann.x, top: selection.y + ann.y,
+                width: ann.w, height: ann.h, zIndex: 10,
+                border: ann.id === selectedAnnotation ? "2px solid #007aff" : "2px solid rgba(0,122,255,0.7)",
+              }}>
+              <textarea value={ann.text || ""} placeholder="Type here..."
+                ref={(el) => { if (el && ann.id === editingTextId) el.focus(); }}
+                onChange={(e) => setAnnotations(prev => prev.map(a => a.id === ann.id ? { ...a, text: e.target.value } : a))}
+                onFocus={() => setEditingTextId(ann.id)}
+                onBlur={() => {
+                  setEditingTextId(null);
+                  // Remove empty textbox on blur
+                  if (!ann.text?.trim()) setAnnotations(prev => prev.filter(a => a.id !== ann.id));
+                }}
+                style={{ width: "100%", height: "100%", background: "transparent", border: "none", outline: "none",
+                  color: ann.color || "#ff0000", fontSize: ann.fontSize || 16, fontFamily: "sans-serif",
+                  fontWeight: ann.bold ? "bold" : "normal", textDecoration: ann.underline ? "underline" : "none",
+                  resize: "none", padding: 2, lineHeight: 1.3, caretColor: ann.color || "#ff0000" }} />
+            </div>
+          ))}
+
+          {/* Temp blur/textbox while drawing */}
+          {tempBlur && tempBlur.width > 0 && tool === "blur" && (
             <div style={{ position: "absolute", left: selection.x + tempBlur.x, top: selection.y + tempBlur.y,
               width: tempBlur.width, height: tempBlur.height,
               backdropFilter: `blur(${blurStrength}px)`, WebkitBackdropFilter: `blur(${blurStrength}px)`,
               border: "1px dashed #007aff", pointerEvents: "none", zIndex: 4 }} />
+          )}
+          {tempBlur && tempBlur.width > 0 && tool === "textbox" && (
+            <div style={{ position: "absolute", left: selection.x + tempBlur.x, top: selection.y + tempBlur.y,
+              width: tempBlur.width, height: tempBlur.height,
+              border: "2px solid rgba(0,122,255,0.7)", pointerEvents: "none", zIndex: 4 }} />
           )}
 
           {/* Text selection layer */}
@@ -535,72 +746,137 @@ function App() {
             pointerEvents: tool !== "text" ? "auto" : "none", cursor: tool ? "crosshair" : "default", zIndex: 10 }}
             onMouseDown={handleCanvasMouseDown} onMouseMove={handleCanvasMouseMove} onMouseUp={handleCanvasMouseUp} />
 
-          {/* Main Toolbar */}
-          <div style={{ position: "absolute", left: Math.max(10, Math.min(selection.x + selection.width / 2 - 195, window.innerWidth - 400)),
-            top: Math.min(selection.y + selection.height + 8, window.innerHeight - 50),
-            background: "rgba(255,255,255,0.95)", borderRadius: 6, padding: 4, display: "flex", gap: 2, boxShadow: "0 2px 10px rgba(0,0,0,0.2)", zIndex: 100 }}>
-            <ToolBtn active={tool === "rect"} onClick={() => handleToolChange("rect")} title="Rectangle">▢</ToolBtn>
-            <ToolBtn active={tool === "oval"} onClick={() => handleToolChange("oval")} title="Oval">○</ToolBtn>
-            <ToolBtn active={tool === "arrow"} onClick={() => handleToolChange("arrow")} title="Arrow">→</ToolBtn>
-            <ToolBtn active={tool === "line"} onClick={() => handleToolChange("line")} title="Line">╱</ToolBtn>
-            <ToolBtn active={tool === "draw"} onClick={() => handleToolChange("draw")} title="Draw">✎</ToolBtn>
-            <div style={{ width: 1, background: "#ddd", margin: "0 2px" }} />
-            <ToolBtn active={showColorPicker} onClick={() => setShowColorPicker(!showColorPicker)} title="Color">
-              <div style={{ width: 14, height: 14, borderRadius: 3, background: strokeColor, border: "1px solid rgba(0,0,0,0.2)" }} />
-            </ToolBtn>
-            <div style={{ width: 1, background: "#ddd", margin: "0 2px" }} />
-            <ToolBtn active={tool === "blur"} onClick={() => handleToolChange("blur")} title="Blur">▦</ToolBtn>
-            <div style={{ width: 1, background: "#ddd", margin: "0 2px" }} />
-            <ToolBtn active={tool === "text"} onClick={() => handleToolChange("text")} title="OCR" style={{ fontWeight: "bold" }}>{ocrLoading ? "..." : "T"}</ToolBtn>
-            <div style={{ width: 1, background: "#ddd", margin: "0 2px" }} />
-            <ToolBtn onClick={handleSave} title="Save">⬇</ToolBtn>
-            <ToolBtn onClick={cancelCapture} style={{ color: "#e00" }} title="Cancel">✕</ToolBtn>
-            <ToolBtn onClick={handleDone} style={{ color: "#007aff" }} title="Copy">✓</ToolBtn>
-          </div>
+          {/* Toolbars — flip above if no space below */}
+          {(() => {
+            const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48];
+            const hasRow2 = tool === "rect" || tool === "oval" || tool === "arrow" || tool === "line" || tool === "draw" || tool === "textbox" || tool === "blur" || !!selectedBlurAnn;
+            const row1H = 42, row2H = 36, gap = 4;
+            const totalH = row1H + (hasRow2 ? row2H + gap : 0);
+            const spaceBelow = window.innerHeight - (selection.y + selection.height);
+            const showAbove = spaceBelow < totalH + 16;
+            const baseTop = showAbove ? selection.y - totalH - 8 : selection.y + selection.height + 8;
+            const row1Top = Math.max(4, baseTop);
+            const row2Top = row1Top + row1H + gap;
+            const toolbarLeft = Math.max(4, Math.min(selection.x + selection.width / 2 - 210, window.innerWidth - 460));
+            const isDrawTool = tool === "rect" || tool === "oval" || tool === "arrow" || tool === "line" || tool === "draw" || tool === "textbox";
+            const isShapeTool = tool === "rect" || tool === "oval" || tool === "arrow" || tool === "line" || tool === "draw";
+            const barStyle = { position: "absolute" as const, left: toolbarLeft,
+              background: "rgba(255,255,255,0.95)", borderRadius: 8, padding: "5px 6px",
+              display: "flex", gap: 3, alignItems: "center" as const,
+              boxShadow: "0 2px 12px rgba(0,0,0,0.25)", zIndex: 100 };
+            return (<>
+              {/* Row 1: Tools + actions */}
+              <div style={{ ...barStyle, top: row1Top }}>
+                <ToolBtn active={tool === "rect"} onClick={() => handleToolChange("rect")} title="Rectangle"><Square size={18} /></ToolBtn>
+                <ToolBtn active={tool === "oval"} onClick={() => handleToolChange("oval")} title="Oval"><Circle size={18} /></ToolBtn>
+                <ToolBtn active={tool === "arrow"} onClick={() => handleToolChange("arrow")} title="Arrow"><ArrowRight size={18} /></ToolBtn>
+                <ToolBtn active={tool === "line"} onClick={() => handleToolChange("line")} title="Line"><Minus size={18} /></ToolBtn>
+                <ToolBtn active={tool === "draw"} onClick={() => handleToolChange("draw")} title="Draw"><Pencil size={18} /></ToolBtn>
+                <ToolBtn active={tool === "textbox"} onClick={() => handleToolChange("textbox")} title="Text"><Type size={18} /></ToolBtn>
+                <ToolBtn active={tool === "blur"} onClick={() => handleToolChange("blur")} title="Blur"><Grid3X3 size={18} /></ToolBtn>
+                <ToolBtn active={tool === "text"} onClick={() => handleToolChange("text")} title="OCR">{ocrLoading ? <span style={{fontSize:11}}>...</span> : <ScanText size={18} />}</ToolBtn>
+                <ToolBtn onClick={handleTranslate} title="Translate selection">{translateLoading ? <span style={{fontSize:11}}>...</span> : <Languages size={18} />}</ToolBtn>
+                <div style={{ width: 1, height: 20, background: "#ddd", margin: "0 1px" }} />
+                <ToolBtn onClick={handleUndo} title="Undo (⌘Z)"><Undo2 size={18} /></ToolBtn>
+                <ToolBtn onClick={handleSave} title="Save"><Download size={18} /></ToolBtn>
+                <ToolBtn onClick={cancelCapture} style={{ color: "#e00" }} title="Cancel"><X size={18} /></ToolBtn>
+                <ToolBtn onClick={handleDone} style={{ color: "#007aff" }} title="Copy to clipboard"><Check size={18} /></ToolBtn>
+              </div>
+              {/* Row 2: Options bar — separate floating bar below */}
+              {hasRow2 && (
+                <div style={{ ...barStyle, top: row2Top, padding: "4px 6px", height: 36 }}>
+                  {/* Stroke width for shape tools */}
+                  {isShapeTool && (<>
+                    <DropPicker value={strokeWidth} options={[1, 2, 3, 4, 6]}
+                      onChange={setStrokeWidth}
+                      renderOption={(v) => <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ width: 18, height: v, background: "currentColor", borderRadius: v / 2 }} />
+                      </div>} />
+                    <div style={{ width: 1, height: 18, background: "#ddd", margin: "0 2px" }} />
+                  </>)}
+                  {/* Font size + bold/underline for textbox */}
+                  {tool === "textbox" && (<>
+                    <DropPicker value={fontSize} options={FONT_SIZES}
+                      onChange={(v) => { setFontSize(v); localStorage.setItem("ishot-fontsize", String(v)); }} />
+                    <button onClick={() => setFontBold(!fontBold)} title="Bold"
+                      style={{ width: 26, height: 26, border: "none", borderRadius: 4, cursor: "pointer",
+                        background: fontBold ? "#007aff" : "transparent", color: fontBold ? "#fff" : "#333",
+                        fontWeight: "bold", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center" }}>B</button>
+                    <button onClick={() => setFontUnderline(!fontUnderline)} title="Underline"
+                      style={{ width: 26, height: 26, border: "none", borderRadius: 4, cursor: "pointer",
+                        background: fontUnderline ? "#007aff" : "transparent", color: fontUnderline ? "#fff" : "#333",
+                        textDecoration: "underline", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center" }}>U</button>
+                    <div style={{ width: 1, height: 18, background: "#ddd", margin: "0 2px" }} />
+                  </>)}
+                  {/* Blur strength */}
+                  {(tool === "blur" || selectedBlurAnn) && (
+                    <input type="range" min="3" max="20" value={selectedBlurAnn?.blurStrength || blurStrength}
+                      onChange={(e) => updateBlurStrength(Number(e.target.value))} style={{ width: 60, cursor: "pointer" }} />
+                  )}
+                  {/* Color picker — square swatches */}
+                  {isDrawTool && COLORS.map(color => (
+                    <button key={color} onClick={() => { setStrokeColor(color); localStorage.setItem("ishot-color", color); }}
+                      style={{ width: 22, height: 22, borderRadius: 3, background: color, flexShrink: 0,
+                        border: color === strokeColor ? "2px solid #007aff" : "1px solid rgba(0,0,0,0.12)",
+                        cursor: "pointer", padding: 0 }} />
+                  ))}
+                </div>
+              )}
+            </>);
+          })()}
 
-          {/* Color picker popup */}
-          {showColorPicker && (
-            <div style={{ position: "absolute", left: Math.max(10, Math.min(selection.x + selection.width / 2 - 195 + 140, window.innerWidth - 200)),
-              top: Math.min(selection.y + selection.height + 48, window.innerHeight - 90),
-              background: "rgba(255,255,255,0.95)", borderRadius: 6, padding: 6, display: "flex", gap: 4,
-              boxShadow: "0 2px 10px rgba(0,0,0,0.2)", zIndex: 101 }}>
-              {COLORS.map(color => (
-                <button key={color} onClick={() => { setStrokeColor(color); localStorage.setItem("ishot-color", color); setShowColorPicker(false); }}
-                  style={{ width: 22, height: 22, borderRadius: 4, background: color, border: color === strokeColor ? "2px solid #007aff" : "1px solid rgba(0,0,0,0.15)",
-                    cursor: "pointer", padding: 0 }} />
-              ))}
-            </div>
-          )}
-
-          {/* Blur strength slider */}
-          {(tool === "blur" || selectedBlurAnn) && (
-            <div style={{ position: "absolute", left: Math.max(10, Math.min(selection.x + selection.width / 2 - 80, window.innerWidth - 170)),
-              top: Math.min(selection.y + selection.height + 48, window.innerHeight - 90),
-              background: "rgba(255,255,255,0.95)", borderRadius: 6, padding: "4px 10px", display: "flex", gap: 8, alignItems: "center",
-              boxShadow: "0 2px 10px rgba(0,0,0,0.2)", fontSize: 12, zIndex: 100 }}>
-              <span style={{ color: "#666", fontSize: 11 }}>Blur:</span>
-              <input type="range" min="3" max="20" value={selectedBlurAnn?.blurStrength || blurStrength}
-                onChange={(e) => updateBlurStrength(Number(e.target.value))} style={{ width: 80, cursor: "pointer" }} />
-            </div>
-          )}
-
-          {/* Hint */}
-          {getHintText() && (
-            <div style={{ position: "absolute", left: selection.x,
-              top: selection.y + selection.height + ((tool === "blur" || selectedBlurAnn) ? 88 : 45),
-              maxWidth: selection.width, background: "rgba(0,0,0,0.85)", color: "#fff", padding: "6px 10px", borderRadius: 4, fontSize: 12, zIndex: 100 }}>
-              {selectedText ? (<><div style={{ marginBottom: 4, opacity: 0.7 }}>{getHintText()}</div>
-                <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 100, overflow: "auto" }}>
-                  {selectedText.slice(0, 200)}{selectedText.length > 200 ? "..." : ""}</div></>
-              ) : <div style={{ opacity: 0.9 }}>{getHintText()}</div>}
-            </div>
-          )}
+          {/* Hint — positioned below both toolbar bars */}
+          {getHintText() && (() => {
+            const hintHasRow2 = tool === "rect" || tool === "oval" || tool === "arrow" || tool === "line" || tool === "draw" || tool === "textbox" || tool === "blur" || !!selectedBlurAnn;
+            const hintOffset = 50 + (hintHasRow2 ? 44 : 0);
+            const spaceBelow = window.innerHeight - (selection.y + selection.height);
+            const hintTop = spaceBelow < hintOffset + 50
+              ? selection.y - 40
+              : selection.y + selection.height + hintOffset;
+            return (
+              <div style={{ position: "absolute", left: selection.x, top: hintTop,
+                maxWidth: selection.width, background: "rgba(0,0,0,0.85)", color: "#fff", padding: "6px 10px", borderRadius: 4, fontSize: 12, zIndex: 99 }}>
+                {selectedText ? (<><div style={{ marginBottom: 4, opacity: 0.7 }}>{getHintText()}</div>
+                  <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 200, overflow: "auto" }}>
+                    {selectedText.slice(0, 500)}{selectedText.length > 500 ? "..." : ""}</div></>
+                ) : <div style={{ opacity: 0.9 }}>{getHintText()}</div>}
+              </div>
+            );
+          })()}
 
           {ocrLoading && tool === "text" && (
             <div style={{ position: "absolute", left: selection.x + selection.width / 2 - 15, top: selection.y + selection.height / 2 - 15,
               width: 30, height: 30, border: "3px solid rgba(255,255,255,0.3)", borderTop: "3px solid #fff",
               borderRadius: "50%", animation: "spin 0.8s linear infinite", zIndex: 20 }} />
           )}
+          {/* Translate spinner — same style as OCR spinner */}
+          {translateLoading && (
+            <div style={{ position: "absolute", left: selection.x + selection.width / 2 - 15, top: selection.y + selection.height / 2 - 15,
+              width: 30, height: 30, border: "3px solid rgba(255,255,255,0.3)", borderTop: "3px solid #fff",
+              borderRadius: "50%", animation: "spin 0.8s linear infinite", zIndex: 20 }} />
+          )}
+          {/* Translate result */}
+          {showTranslate && !translateLoading && translatedText && (
+            <div style={{ position: "absolute",
+              left: Math.max(10, selection.x), top: Math.max(10, selection.y + 30),
+              width: Math.min(Math.max(selection.width, 280), 420),
+              display: "flex", flexDirection: "column", gap: 4, zIndex: 200 }}>
+              <div style={{ background: "rgba(255,255,255,0.97)", borderRadius: 8, padding: 12,
+                boxShadow: "0 4px 20px rgba(0,0,0,0.3)" }}>
+                <div style={{ fontSize: 13, lineHeight: 1.6, color: "#222", whiteSpace: "pre-wrap", wordBreak: "break-word",
+                  userSelect: "text", cursor: "text" }}>{translatedText}</div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 3 }}>
+                <button onClick={() => { setShowTranslate(false); cancelCapture(); }}
+                  style={{ height: 28, padding: "0 12px", border: "none", borderRadius: 6, background: "rgba(255,255,255,0.95)", color: "#333",
+                    fontSize: 12, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 1px 4px rgba(0,0,0,0.15)" }}>Close</button>
+                <button onClick={async () => { await navigator.clipboard.writeText(translatedText); setShowTranslate(false); cancelCapture(); }}
+                  style={{ height: 28, padding: "0 14px", border: "none", borderRadius: 6, background: "#007aff", color: "#fff",
+                    fontSize: 12, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 1px 4px rgba(0,0,0,0.15)" }}>Copy</button>
+              </div>
+            </div>
+          )}
+
           <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         </>
       )}
@@ -609,9 +885,48 @@ function App() {
 }
 
 function ToolBtn({ children, active, onClick, style, title }: any) {
-  return (<button onClick={onClick} title={title} style={{ width: 28, height: 28, border: "none", borderRadius: 4,
+  return (<button onClick={onClick} title={title} style={{ width: 32, height: 32, border: "none", borderRadius: 5,
     background: active ? "#007aff" : "transparent", color: active ? "#fff" : "#333",
     cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", ...style }}>{children}</button>);
+}
+
+function DropPicker({ value, options, onChange, renderOption }: {
+  value: number; options: number[]; onChange: (v: number) => void;
+  renderOption?: (v: number) => React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button onClick={() => setOpen(!open)}
+        style={{ height: 28, minWidth: 40, borderRadius: 5, border: "none", fontSize: 12, padding: "0 8px",
+          cursor: "pointer", background: open ? "#007aff" : "rgba(0,0,0,0.06)", color: open ? "#fff" : "#333",
+          display: "flex", alignItems: "center", gap: 4, fontFamily: "inherit" }}>
+        {renderOption ? renderOption(value) : `${value}px`}
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 4,
+          background: "rgba(255,255,255,0.97)", borderRadius: 6, padding: 3,
+          boxShadow: "0 4px 16px rgba(0,0,0,0.25)", zIndex: 200, display: "flex", flexDirection: "column", gap: 1,
+          minWidth: ref.current?.offsetWidth || 40 }}>
+          {options.map(v => (
+            <button key={v} onClick={() => { onChange(v); setOpen(false); }}
+              style={{ height: 26, border: "none", borderRadius: 4, fontSize: 12, padding: "0 8px",
+                background: v === value ? "#007aff" : "transparent", color: v === value ? "#fff" : "#333",
+                cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", whiteSpace: "nowrap" }}>
+              {renderOption ? renderOption(v) : `${v}px`}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default App;

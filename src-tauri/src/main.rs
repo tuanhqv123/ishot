@@ -1,5 +1,6 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(unexpected_cfgs)]
 
 mod commands;
 mod error;
@@ -16,14 +17,14 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "macos")]
+#[allow(deprecated)]
 use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
 #[cfg(target_os = "macos")]
-use cocoa::base::{id, nil};
+#[allow(deprecated)]
+use cocoa::base::id;
 #[cfg(target_os = "macos")]
 #[macro_use]
 extern crate objc;
-#[cfg(target_os = "macos")]
-use objc::runtime::Class;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
@@ -80,31 +81,95 @@ struct AppState {
 }
 
 fn trigger_screenshot(app: &tauri::AppHandle) {
+    use crate::services::screen_capture::ScreenCaptureService;
+
+    let monitors = match ScreenCaptureService::get_monitors_info() {
+        Ok(m) => m,
+        Err(e) => { eprintln!("get_monitors_info failed: {}", e); return; }
+    };
+    println!("[monitors] count={} {:?}", monitors.len(), monitors);
+
+    // Show the main overlay on the primary monitor
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        if let Some(m) = monitors.first() {
+            let _ = overlay.set_position(tauri::Position::Logical(
+                tauri::LogicalPosition::new(m.x, m.y),
+            ));
+            let _ = overlay.set_size(tauri::Size::Logical(tauri::LogicalSize::new(m.width, m.height)));
+        }
+        let _ = overlay.show();
+        let _ = overlay.set_focus();
+    }
+
+    // Create or reuse overlay windows for secondary monitors
+    for (i, m) in monitors.iter().enumerate().skip(1) {
+        let label = format!("overlay_{}", i);
+        // Reuse existing window if present
+        if let Some(existing) = app.get_webview_window(&label) {
+            let _ = existing.show();
+            continue;
+        }
+        let builder = tauri::WebviewWindowBuilder::new(
+            app,
+            &label,
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title("")
+        .position(m.x, m.y)
+        .inner_size(m.width, m.height)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .resizable(false)
+        .visible(true)
+        .focused(false);
+
+        match builder.build() {
+            Ok(win) => {
+                #[cfg(target_os = "macos")]
+                #[allow(deprecated)]
+                if let Ok(ns_ptr) = win.ns_window() {
+                    let ns_win = ns_ptr as id;
+                    unsafe {
+                        ns_win.setLevel_(1000);
+                        ns_win.setCollectionBehavior_(
+                            NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
+                        );
+                    }
+                }
+                println!("[overlay_{}] created at ({},{} {}x{})", i, m.x, m.y, m.width, m.height);
+            }
+            Err(e) => eprintln!("[overlay_{}] failed: {}", i, e),
+        }
+    }
+
+    // Capture in background thread
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        use crate::services::screen_capture::ScreenCaptureService;
-        
-        if let Some(overlay) = app_clone.get_webview_window("overlay") {
-            let _ = overlay.show();
-            let _ = overlay.set_focus();
-        }
-        
-        match ScreenCaptureService::capture_main_display() {
-            Ok((png_data, width, height)) => {
-                let base64_data = BASE64.encode(&png_data);
-                let _ = app_clone.emit("screenshot-ready", serde_json::json!({
-                    "data": base64_data,
-                    "width": width,
-                    "height": height
-                }));
-            }
-            Err(e) => {
-                eprintln!("Screenshot failed: {}", e);
-                if let Some(overlay) = app_clone.get_webview_window("overlay") {
-                    let _ = overlay.hide();
+        let monitors = ScreenCaptureService::get_monitors_info().unwrap_or_default();
+
+        let mut displays: Vec<serde_json::Value> = Vec::new();
+        for (i, monitor) in monitors.iter().enumerate() {
+            let display_num = i + 1;
+            match ScreenCaptureService::capture_display(display_num) {
+                Ok((png_data, w, h)) => {
+                    let b64 = BASE64.encode(&png_data);
+                    displays.push(serde_json::json!({
+                        "data": b64,
+                        "width": w,
+                        "height": h,
+                        "monitor": monitor,
+                    }));
                 }
+                Err(e) => eprintln!("[capture] display {} failed: {}", display_num, e),
             }
         }
+
+        let _ = app_clone.emit("screenshot-ready", serde_json::json!({
+            "displays": displays,
+            "monitors": monitors,
+        }));
     });
 }
 
@@ -148,15 +213,16 @@ fn main() {
                 request_screen_recording_permission();
             }
 
-            // Setup overlay window
+            // Setup overlay window on primary display
             if let Some(overlay) = app.get_webview_window("overlay") {
-                if let Ok((_, _, width, height)) = ScreenCaptureService::get_display_bounds() {
-                    let _ = overlay.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(0, 0)));
+                if let Ok((x, y, width, height)) = ScreenCaptureService::get_display_bounds() {
+                    let _ = overlay.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)));
                     let _ = overlay.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
-                    
+
                     #[cfg(target_os = "macos")]
-                    {
-                        let ns_window = overlay.ns_window().unwrap() as id;
+                    #[allow(deprecated)]
+                    if let Ok(ns_ptr) = overlay.ns_window() {
+                        let ns_window = ns_ptr as id;
                         unsafe {
                             ns_window.setLevel_(1000);
                             ns_window.setCollectionBehavior_(
@@ -164,6 +230,7 @@ fn main() {
                                 | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
                             );
                             use cocoa::foundation::{NSRect, NSPoint, NSSize};
+                            #[allow(deprecated)]
                             let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
                             let _: () = msg_send![ns_window, setFrame:frame display:true];
                         }
@@ -289,11 +356,13 @@ fn main() {
             commands::screenshot::capture_screen,
             commands::screenshot::capture_region,
             commands::screenshot::get_display_bounds,
+            commands::screenshot::get_monitors_info,
             commands::window::show_overlay,
             commands::window::hide_overlay,
             commands::file::copy_to_clipboard,
             commands::file::save_to_file,
             commands::ocr::perform_ocr,
+            commands::translate::translate_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -366,8 +435,9 @@ fn open_shortcut_recorder(app: &tauri::AppHandle) {
         let _ = win.set_focus();
         
         #[cfg(target_os = "macos")]
-        {
-            let ns_win = win.ns_window().unwrap() as id;
+        #[allow(deprecated)]
+        if let Ok(ns_ptr) = win.ns_window() {
+            let ns_win = ns_ptr as id;
             unsafe {
                 ns_win.setLevel_(1001);
                 let _: () = msg_send![ns_win, setOpaque: false];

@@ -1,0 +1,137 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        background: transparent !important;
+        overflow: hidden;
+        -webkit-user-select: none;
+        user-select: none;
+        width: 100%;
+        height: 100%;
+      }
+      body {
+        display: flex;
+        align-items: flex-end;
+        justify-content: flex-end;
+        padding: 12px;
+      }
+      .preview {
+        position: relative;
+        width: 200px;
+      }
+      .preview img {
+        width: 100%;
+        display: block;
+        border-radius: 8px;
+      }
+      .btns {
+        display: flex;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      .btn {
+        flex: 1;
+        padding: 5px 0;
+        border: none;
+        border-radius: 6px;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      }
+      .btn:active {
+        opacity: 0.7;
+      }
+      .btn-stop {
+        background: #4ade80;
+        color: #000;
+      }
+      .btn-cancel {
+        background: rgba(255, 255, 255, 0.15);
+        color: rgba(255, 255, 255, 0.8);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="preview" id="preview" style="display: none">
+      <img id="thumb" />
+      <div class="btns">
+        <button class="btn btn-stop" id="stopBtn">■ Stop</button>
+        <button class="btn btn-cancel" id="cancelBtn">✕</button>
+      </div>
+    </div>
+    <script>
+      var T = window.__TAURI__;
+      var cleaned = false;
+
+      function cleanup() {
+        if (cleaned) return;
+        cleaned = true;
+        T.event.emit("scroll-capture-done");
+        T.window.getCurrentWindow().close();
+      }
+
+      document.getElementById("stopBtn").onclick = function () {
+        T.core
+          .invoke("stop_scroll_capture")
+          .then(function (r) {
+            if (r && r.data) {
+              return T.core
+                .invoke("copy_to_clipboard", { imageBytes: r.data })
+                .then(function () {
+                  new Notification("iShot", {
+                    body: "Saved " + r.width + "x" + r.height,
+                  });
+                });
+            }
+          })
+          .catch(function (e) {
+            console.error(e);
+          })
+          .then(cleanup);
+      };
+
+      document.getElementById("cancelBtn").onclick = function () {
+        T.core.invoke("cancel_scroll_capture").catch(function () {});
+        cleanup();
+      };
+
+      T.event.listen("scroll-capture-progress", function (ev) {
+        var p = ev.payload;
+        if (p.thumbnail) {
+          document.getElementById("thumb").src =
+            "data:image/png;base64," + p.thumbnail;
+          document.getElementById("preview").style.display = "block";
+        }
+      });
+
+      T.event.listen("scroll-capture-result", function (ev) {
+        if (cleaned) return;
+        var d = ev.payload;
+        if (d.data) {
+          T.core
+            .invoke("copy_to_clipboard", { imageBytes: d.data })
+            .then(function () {
+              new Notification("iShot", {
+                body: "Saved " + d.width + "x" + d.height,
+              });
+            });
+        }
+        cleanup();
+      });
+
+      T.event.listen("scroll-capture-error", function () {
+        if (cleaned) return;
+        cleanup();
+      });
+    </script>
+  </body>
+</html>

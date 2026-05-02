@@ -1,0 +1,47 @@
+{
+  "files": {
+    "src/commands/window.rs": {
+      "modifiedRanges": [
+        {
+          "start": 1,
+          "end": 122
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-05-02T04:17:25.403Z"
+    },
+    "src/main.rs": {
+      "modifiedRanges": [
+        {
+          "start": 1,
+          "end": 464
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-05-02T02:52:47.928Z"
+    },
+    "src/services/scroll_capture.rs": {
+      "modifiedRanges": [
+        {
+          "start": 1,
+          "end": 975
+        }
+      ],
+      "importsChanged": true,
+      "lastEdit": "2026-05-02T04:10:41.482Z"
+    },
+    "src/commands/scroll_capture.rs": {
+      "modifiedRanges": [
+        {
+          "start": 1,
+          "end": 81
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-05-02T03:11:00.603Z"
+    }
+  },
+  "turnCycles": 0,
+  "maxCycles": 3,
+  "lastUpdated": "2026-05-02T04:17:25.403Z"
+}

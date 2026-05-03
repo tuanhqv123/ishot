@@ -1,9 +1,8 @@
 use crate::error::{AppError, Result};
 use crate::services::screen_capture::ScreenCaptureService;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 use std::thread;
 use base64::Engine as _;
 use serde::Serialize;
@@ -74,13 +73,6 @@ impl Default for ScrollCaptureState {
 pub struct ScrollCaptureService;
 
 impl ScrollCaptureService {
-    fn unique_timestamp() -> u128 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    }
-
     /// Quick check if two frames are different (lightweight, for idle detection).
     /// Samples a few rows at strategic positions to detect any change.
     fn frames_differ(
@@ -106,36 +98,6 @@ impl ScrollCaptureService {
             }
         }
         false
-    }
-
-    /// Capture a region of the screen using screencapture CLI
-    fn capture_region(x: f64, y: f64, width: f64, height: f64) -> Result<(Vec<u8>, u32, u32)> {
-        let temp_path = format!("/tmp/ishot_scroll_{}.png", Self::unique_timestamp());
-        let region = format!("{},{},{},{}", x as i32, y as i32, width as i32, height as i32);
-
-        let status = Command::new("screencapture")
-            .args(["-x", "-C", "-R", &region, &temp_path])
-            .status()
-            .map_err(|e| AppError::ScreenCapture(format!("screencapture failed: {}", e)))?;
-
-        if !status.success() {
-            return Err(AppError::ScreenCapture("screencapture failed".to_string()));
-        }
-
-        let png_data = std::fs::read(&temp_path)
-            .map_err(|e| AppError::ScreenCapture(format!("read capture failed: {}", e)))?;
-        let _ = std::fs::remove_file(&temp_path);
-
-        // Extract dimensions from PNG header without holding reference to png_data
-        let (w, h) = {
-            let decoder = png::Decoder::new(std::io::Cursor::new(&png_data));
-            let reader = decoder
-                .read_info()
-                .map_err(|e| AppError::ScreenCapture(format!("PNG decode failed: {}", e)))?;
-            (reader.info().width, reader.info().height)
-        };
-
-        Ok((png_data, w, h))
     }
 
     fn collect_pairs(
@@ -263,14 +225,13 @@ impl ScrollCaptureService {
             return Ok(());
         }
 
-        let overlap = offset;
-        let base_non_overlap = base.height().saturating_sub(overlap);
-        let new_rows = new_frame.height().saturating_sub(overlap);
-        let new_total = base_non_overlap + overlap + new_rows;
-
-        if new_rows == 0 && overlap == 0 {
+        // offset = overlap rows. scroll_amount = new content added.
+        let scroll_amount = new_frame.height().saturating_sub(offset);
+        if scroll_amount == 0 {
             return Ok(());
         }
+
+        let new_total = base.height() + scroll_amount;
 
         if new_total > MAX_SCROLL_HEIGHT {
             return Err(AppError::ScreenCapture(format!(
@@ -287,24 +248,75 @@ impl ScrollCaptureService {
         let base_w = base.width() as usize;
         let base_bpr = base_w * 4;
 
-        for y in 0..base_non_overlap {
+        let new_raw = new_frame.as_raw();
+        let new_w = new_frame.width() as usize;
+        let new_bpr = new_w * 4;
+
+        // Copy base entirely (base rows 0..base.height())
+        for y in 0..base.height() {
             let src_off = y as usize * base_bpr;
             let dst_off = y as usize * bytes_per_row;
             let copy_len = base_bpr.min(bytes_per_row).min(composite.len() - dst_off).min(base_raw.len() - src_off);
             composite[dst_off..dst_off + copy_len].copy_from_slice(&base_raw[src_off..src_off + copy_len]);
         }
 
-        let new_raw = new_frame.as_raw();
-        let new_w = new_frame.width() as usize;
-        let new_bpr = new_w * 4;
+        // Find best cut row within overlap (row with smallest difference)
+        let blend_zone = 8u32.min(offset / 2);
+        let search_start = offset.saturating_sub(blend_zone);
+        let search_end = offset;
+        let x_step = 3usize;
+        let x_count = (width as usize / x_step).min(60);
 
-        for y in 0..overlap {
-            let weight = (y as f32 + 0.5) / overlap as f32;
-            let base_y = base_non_overlap + y;
-            let new_y = y;
-            let dest_y = base_non_overlap + y;
+        let mut best_cut = offset;
+        let mut best_sad = u64::MAX;
 
+        for cut_row in search_start..search_end {
+            let base_y = base.height() - offset + cut_row;
+            let new_y = cut_row;
             if base_y >= base.height() || new_y >= new_frame.height() { continue; }
+
+            let mut sad: u64 = 0;
+            for xi in 0..x_count {
+                let x = (xi * x_step) as u32;
+                let bx = (base_y as usize * base_bpr) + (x as usize) * 4;
+                let nx = (new_y as usize * new_bpr) + (x as usize) * 4;
+                if bx + 2 >= base_raw.len() || nx + 2 >= new_raw.len() { continue; }
+                sad += (base_raw[bx] as i32 - new_raw[nx] as i32).unsigned_abs() as u64
+                     + (base_raw[bx+1] as i32 - new_raw[nx+1] as i32).unsigned_abs() as u64
+                     + (base_raw[bx+2] as i32 - new_raw[nx+2] as i32).unsigned_abs() as u64;
+            }
+            if sad < best_sad {
+                best_sad = sad;
+                best_cut = cut_row;
+            }
+        }
+
+        // Blend a small zone around the cut point (±4 rows)
+        let blend_half = 4u32;
+        let blend_start = best_cut.saturating_sub(blend_half);
+        let blend_end = (best_cut + blend_half).min(offset);
+
+        // First: copy new_frame rows after the cut (non-overlap new content)
+        for y in offset..new_frame.height() {
+            let dest_y = base.height() + y - offset;
+            if dest_y >= new_total { break; }
+            let src_off = y as usize * new_bpr;
+            let dst_off = dest_y as usize * bytes_per_row;
+            let copy_len = new_bpr.min(bytes_per_row).min(composite.len() - dst_off).min(new_raw.len() - src_off);
+            composite[dst_off..dst_off + copy_len].copy_from_slice(&new_raw[src_off..src_off + copy_len]);
+        }
+
+        // Then: overwrite the blend zone with smooth transition
+        for y in blend_start..blend_end {
+            if y >= offset { break; }
+            let base_y = base.height() - offset + y;
+            let new_y = y;
+            let dest_y = base.height() - offset + y;
+            if base_y >= base.height() || new_y >= new_frame.height() { continue; }
+
+            let dist_from_cut = (y as i32 - best_cut as i32).unsigned_abs() as f32;
+            let weight = 1.0 - (dist_from_cut / (blend_half as f32 * 2.0 + 1.0));
+            let weight = weight.max(0.0).min(1.0);
 
             let base_off = base_y as usize * base_bpr;
             let new_off = new_y as usize * new_bpr;
@@ -331,17 +343,6 @@ impl ScrollCaptureService {
                 composite[dx + 2] = (bb * (1.0 - weight) + nb * weight) as u8;
                 composite[dx + 3] = 255;
             }
-        }
-
-        for y in 0..new_rows {
-            let src_y = overlap + y;
-            let dest_y = base_non_overlap + overlap + y;
-            if src_y >= new_frame.height() || dest_y >= new_total { break; }
-
-            let src_off = src_y as usize * new_bpr;
-            let dst_off = dest_y as usize * bytes_per_row;
-            let copy_len = new_bpr.min(bytes_per_row).min(composite.len() - dst_off).min(new_raw.len() - src_off);
-            composite[dst_off..dst_off + copy_len].copy_from_slice(&new_raw[src_off..src_off + copy_len]);
         }
 
         *base = image::RgbaImage::from_raw(width, new_total, composite)
@@ -711,11 +712,12 @@ mod tests {
         let new_frame = solid_image(100, 200, 0, 255, 0);
 
         let mut base = base;
-        let result = OffsetResult { offset: 50, confidence: 0.95 };
+        // overlap=50 means scroll_amount = 200 - 50 = 150 new rows
+        let result = OffsetResult { offset: 150, confidence: 0.95 };
         ScrollCaptureService::stitch_frame(&mut base, &new_frame, &result).unwrap();
 
         assert_eq!(base.width(), 100);
-        assert_eq!(base.height(), 200 + (200 - 50));
+        assert_eq!(base.height(), 200 + (200 - 150)); // 200 + 50 = 250
     }
 
     #[test]
@@ -726,6 +728,7 @@ mod tests {
         let mut base = base;
         let original_height = base.height();
 
+        // offset < min_off → noop
         let result = OffsetResult { offset: 1, confidence: 0.95 };
         ScrollCaptureService::stitch_frame(&mut base, &new_frame, &result).unwrap();
         assert_eq!(base.height(), original_height, "Should not stitch for offset below threshold");
@@ -743,7 +746,7 @@ mod tests {
         let mut base = base;
         let original_height = base.height();
 
-        let result = OffsetResult { offset: 50, confidence: 0.3 };
+        let result = OffsetResult { offset: 150, confidence: 0.3 };
         ScrollCaptureService::stitch_frame(&mut base, &new_frame, &result).unwrap();
         assert_eq!(base.height(), original_height, "Should not stitch with low confidence");
     }
@@ -754,7 +757,7 @@ mod tests {
         let new_frame = solid_image(100, 200, 0, 255, 0);
 
         let mut base = base;
-        let result = OffsetResult { offset: 50, confidence: 0.95 };
+        let result = OffsetResult { offset: 150, confidence: 0.95 };
         ScrollCaptureService::stitch_frame(&mut base, &new_frame, &result).unwrap();
 
         let top_pixel = base.get_pixel(0, 0);
@@ -767,7 +770,7 @@ mod tests {
         let new_frame = solid_image(100, 200, 0, 255, 0);
 
         let mut base = base;
-        let result = OffsetResult { offset: 50, confidence: 0.95 };
+        let result = OffsetResult { offset: 150, confidence: 0.95 };
         ScrollCaptureService::stitch_frame(&mut base, &new_frame, &result).unwrap();
 
         let total_height = base.height();
@@ -782,11 +785,12 @@ mod tests {
 
         for _ in 0..5 {
             let frame = solid_image(100, 100, 0, 255, 0);
-            let result = OffsetResult { offset: 30, confidence: 0.95 };
+            // overlap=70 → scroll_amount=30 new rows per stitch
+            let result = OffsetResult { offset: 70, confidence: 0.95 };
             ScrollCaptureService::stitch_frame(&mut base, &frame, &result).unwrap();
         }
 
-        let expected = 100 + 5 * (100 - 30);
+        let expected = 100 + 5 * (100 - 70);
         assert_eq!(base.height(), expected, "Height should accumulate across multiple stitches");
     }
 
@@ -796,7 +800,10 @@ mod tests {
         let mut base = solid_image(100, h, 255, 0, 0);
         let new_frame = solid_image(100, h, 0, 255, 0);
 
+        // overlap must pass min_off threshold, scroll_amount must cause exceed
         let min_off = (h as f64 * MIN_OFFSET_RATIO).max(MIN_OFFSET_ABSOLUTE) as u32;
+        // overlap = min_off, scroll = h - min_off
+        // total = h + (h - min_off) = 2h - min_off = 20600 - 515 = 20085 > 20000
         let result = OffsetResult { offset: min_off, confidence: 0.95 };
         let err = ScrollCaptureService::stitch_frame(&mut base, &new_frame, &result);
         assert!(err.is_err(), "Should error when exceeding max height");
@@ -808,9 +815,10 @@ mod tests {
         let new_frame = solid_image(100, 100, 0, 255, 0);
         let original_height = base.height();
 
+        // overlap=100 → scroll_amount = 0 → noop
         let result = OffsetResult { offset: 100, confidence: 0.95 };
         ScrollCaptureService::stitch_frame(&mut base, &new_frame, &result).unwrap();
-        assert_eq!(base.height(), original_height, "No new content when offset equals frame height");
+        assert_eq!(base.height(), original_height, "No new content when overlap equals frame height");
     }
 
     #[test]
@@ -820,10 +828,10 @@ mod tests {
         let new_frame = shifted_image(&base, -80);
         let height_before = base.height();
 
-        let result = OffsetResult { offset: 80, confidence: 0.95 };
+        let result = OffsetResult { offset: 320, confidence: 0.95 };
         ScrollCaptureService::stitch_frame(&mut base, &new_frame, &result).unwrap();
 
-        assert_eq!(base.height(), height_before + (400 - 80));
+        assert_eq!(base.height(), height_before + (400 - 320));
         assert_eq!(base.width(), 200);
 
         let top = base.get_pixel(0, 0);
@@ -831,17 +839,19 @@ mod tests {
     }
 
     #[test]
-    fn test_stitch_overlap_blend_is_smooth() {
+    fn test_stitch_overlap_blend_zone_is_narrow() {
         let mut base = gradient_image(200, 400);
-        let offset = 80u32;
-        let new_frame = shifted_image(&base, -(offset as i32));
+        let overlap = 320u32;
+        let new_frame = shifted_image(&base, -(400i32 - overlap as i32));
 
-        let result = OffsetResult { offset, confidence: 0.95 };
+        let result = OffsetResult { offset: overlap, confidence: 0.95 };
         ScrollCaptureService::stitch_frame(&mut base, &new_frame, &result).unwrap();
 
-        let blend_row = 400 - offset / 2;
-        let pixel = base.get_pixel(50, blend_row);
-        assert_ne!(pixel.0, [0, 0, 0, 0], "blend zone should not be empty/black");
+        // Base top should be fully preserved (not blended)
+        let top = base.get_pixel(50, 50);
+        let base_orig = gradient_image(200, 400);
+        let orig_top = base_orig.get_pixel(50, 50);
+        assert_eq!(top.0, orig_top.0, "Top area should be preserved from base without blending");
     }
 
     // ── ScrollCaptureState tests ──

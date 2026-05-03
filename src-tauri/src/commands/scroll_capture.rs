@@ -34,12 +34,8 @@ pub async fn start_scroll_capture(
     // Spawn capture in background thread
     std::thread::spawn(move || {
         match ScrollCaptureService::start_capture(state_clone, rect, app_emit.clone()) {
-            Ok(Some((data, w, h))) => {
-                let _ = app_emit.emit("scroll-capture-result", ScrollCaptureResult {
-                    data,
-                    width: w,
-                    height: h,
-                });
+            Ok(Some((_data, _w, _h))) => {
+                // Result already emitted by finalize() — nothing to do here
             }
             Ok(None) => {
                 // Cancelled or stopped - handled by separate command

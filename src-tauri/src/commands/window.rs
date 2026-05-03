@@ -105,14 +105,11 @@ pub async fn hide_scroll_panel(app_handle: tauri::AppHandle) -> Result<(), Strin
 #[tauri::command]
 pub async fn show_scroll_border(app_handle: tauri::AppHandle, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
     let border_px = 4.0f64;
-    eprintln!("[scroll_border] creating around x={}, y={}, w={}, h={}", x, y, width, height);
     
-    // Close existing border window if any
     if let Some(existing) = app_handle.get_webview_window("scroll_border") {
         let _ = existing.close();
     }
 
-    // Create border window LARGER than selection, positioned OUTSIDE
     let win_x = x - border_px;
     let win_y = y - border_px;
     let win_w = width + border_px * 2.0;
@@ -135,25 +132,17 @@ pub async fn show_scroll_border(app_handle: tauri::AppHandle, x: f64, y: f64, wi
     .build()
     .map_err(|e| format!("Failed to create border window: {}", e))?;
 
-    // Allow user to click/scroll through the border window
     border_window.set_ignore_cursor_events(true)
         .map_err(|e| format!("Failed to set cursor passthrough: {}", e))?;
 
-    eprintln!("[scroll_border] created AROUND ({}, {}) {}x{} (win at {},{} {}x{})", 
-        x, y, width, height, win_x, win_y, win_w, win_h);
     Ok(())
 }
 
 /// Hide scroll border window.
 #[tauri::command]
 pub async fn hide_scroll_border(app_handle: tauri::AppHandle) -> Result<(), String> {
-    eprintln!("[scroll_border] hide_scroll_border called");
     if let Some(border) = app_handle.get_webview_window("scroll_border") {
-        eprintln!("[scroll_border] found window, closing...");
         let _ = border.close();
-        eprintln!("[scroll_border] closed");
-    } else {
-        eprintln!("[scroll_border] window not found");
     }
     Ok(())
 }

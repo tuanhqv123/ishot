@@ -25,12 +25,19 @@
       }
       .preview {
         position: relative;
-        width: 200px;
+        width: 216px;
+        background: rgba(0, 0, 0, 0.75);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-radius: 10px;
+        padding: 8px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
       }
       .preview img {
         width: 100%;
         display: block;
-        border-radius: 8px;
+        border-radius: 6px;
+        image-rendering: auto;
       }
       .btns {
         display: flex;
@@ -39,24 +46,25 @@
       }
       .btn {
         flex: 1;
-        padding: 5px 0;
+        height: 30px;
         border: none;
         border-radius: 6px;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 600;
         cursor: pointer;
         font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        transition: opacity 0.1s;
       }
       .btn:active {
-        opacity: 0.7;
+        opacity: 0.75;
       }
       .btn-stop {
-        background: #4ade80;
-        color: #000;
+        background: #007aff;
+        color: #fff;
       }
       .btn-cancel {
-        background: rgba(255, 255, 255, 0.15);
-        color: rgba(255, 255, 255, 0.8);
+        background: rgba(255, 255, 255, 0.95);
+        color: #333;
       }
     </style>
   </head>
@@ -64,8 +72,8 @@
     <div class="preview" id="preview" style="display: none">
       <img id="thumb" />
       <div class="btns">
-        <button class="btn btn-stop" id="stopBtn">■ Stop</button>
-        <button class="btn btn-cancel" id="cancelBtn">✕</button>
+        <button class="btn btn-stop" id="stopBtn">Done</button>
+        <button class="btn btn-cancel" id="cancelBtn">Cancel</button>
       </div>
     </div>
     <script>
@@ -96,11 +104,15 @@
           .catch(function (e) {
             console.error(e);
           })
-          .then(cleanup);
+          .then(function () {
+            T.core.invoke("hide_scroll_border").catch(function () {});
+            cleanup();
+          });
       };
 
       document.getElementById("cancelBtn").onclick = function () {
         T.core.invoke("cancel_scroll_capture").catch(function () {});
+        T.core.invoke("hide_scroll_border").catch(function () {});
         cleanup();
       };
 

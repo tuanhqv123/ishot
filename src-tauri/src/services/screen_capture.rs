@@ -166,4 +166,35 @@ impl ScreenCaptureService {
             bounds.size.height,
         ))
     }
+
+    /// Capture a region using screencapture CLI
+    pub fn capture_region(x: f64, y: f64, width: f64, height: f64) -> Result<(Vec<u8>, u32, u32)> {
+        let temp_path = format!("/tmp/ishot_scroll_{}.png", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis());
+        let region = format!("{},{},{},{}", x as i32, y as i32, width as i32, height as i32);
+
+        let status = Command::new("screencapture")
+            .args(["-x", "-C", "-R", &region, &temp_path])
+            .status()
+            .map_err(|e| AppError::ScreenCapture(format!("screencapture failed: {}", e)))?;
+
+        if !status.success() {
+            return Err(AppError::ScreenCapture("screencapture failed".to_string()));
+        }
+
+        let png_data = std::fs::read(&temp_path)
+            .map_err(|e| AppError::ScreenCapture(format!("read capture failed: {}", e)))?;
+        let _ = std::fs::remove_file(&temp_path);
+
+        let (w, h) = {
+            let decoder = png::Decoder::new(std::io::Cursor::new(&png_data));
+            let reader = decoder.read_info()
+                .map_err(|e| AppError::ScreenCapture(format!("PNG decode failed: {}", e)))?;
+            (reader.info().width, reader.info().height)
+        };
+
+        Ok((png_data, w, h))
+    }
 }

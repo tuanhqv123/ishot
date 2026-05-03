@@ -374,6 +374,8 @@ fn main() {
             commands::window::set_overlay_passthrough,
             commands::window::show_scroll_panel,
             commands::window::hide_scroll_panel,
+            commands::window::show_scroll_border,
+            commands::window::hide_scroll_border,
             commands::file::copy_to_clipboard,
             commands::file::copy_text_to_clipboard,
             commands::file::save_to_file,

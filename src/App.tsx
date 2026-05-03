@@ -124,6 +124,7 @@ function App() {
 	const [lockedByOther, setLockedByOther] = useState(false);
 	const [scrollCapturing, setScrollCapturing] = useState(false);
 	const [scrollFrames, setScrollFrames] = useState(0);
+	const [showScreenshot, setShowScreenshot] = useState(true);
 
 	// Color picker
 	const COLORS = [
@@ -559,22 +560,31 @@ function App() {
 		}
 	}, [selection, findDisplay, monitors]);
 
-	// Click Start button → hide overlay, show scroll panel, begin capture
+	// Click Start button → hide overlay, show border window, show scroll panel, begin capture
 	const handleScrollBegin = useCallback(async () => {
+		if (!selection) return;
 		try {
 			await invoke("hide_overlay");
+			await invoke("show_scroll_border", {
+				x: selection.x,
+				y: selection.y,
+				width: selection.width,
+				height: selection.height,
+			});
 			await invoke("show_scroll_panel");
 			await invoke("start_scroll_capture");
 		} catch (e) {
 			console.error("[scroll] start failed:", e);
 			setScrollCapturing(false);
 		}
-	}, []);
+	}, [selection]);
 
 	// Cancel scroll (before or during capture)
 	const handleScrollCancel = useCallback(async () => {
 		try {
 			await invoke("cancel_scroll_capture");
+			await invoke("hide_scroll_panel");
+			await invoke("hide_scroll_border");
 		} catch (e) {
 			console.error("[scroll] cancel failed:", e);
 		}
@@ -608,6 +618,8 @@ function App() {
 				});
 			}
 			setScrollCapturing(false);
+			await invoke("hide_scroll_panel").catch(() => {});
+			await invoke("hide_scroll_border").catch(() => {});
 			resetState();
 		});
 		return () => {
@@ -1318,7 +1330,7 @@ function App() {
 			onMouseUp={handleMouseUp}
 		>
 			{/* Render this monitor's screenshot filling the viewport */}
-			{displayCaptures[myMonitorIndex] && (
+			{showScreenshot && displayCaptures[myMonitorIndex] && (
 				<img
 					src={`data:image/png;base64,${displayCaptures[myMonitorIndex].data}`}
 					alt=""
@@ -1348,7 +1360,8 @@ function App() {
 				/>
 			)}
 
-			{selection && selection.width > 0 && (
+			{/* Dark overlay with clip - hide during scroll mode so user can see screen */}
+			{selection && selection.width > 0 && !scrollCapturing && (
 				<div
 					style={{
 						position: "absolute",
@@ -1363,6 +1376,7 @@ function App() {
 				/>
 			)}
 
+			{/* Selection border - always show during scroll */}
 			{selection && selection.width > 0 && (
 				<>
 					<div
@@ -1600,29 +1614,49 @@ function App() {
 								position: "absolute",
 								left: Math.max(4, selection.x + selection.width / 2 - 100),
 								top: selection.y + selection.height + 8,
-								background: "rgba(255,255,255,0.95)",
+								background: "rgba(30,30,30,0.85)",
 								borderRadius: 8,
 								padding: "5px 6px",
 								display: "flex",
-								gap: 3,
-								boxShadow: "0 2px 12px rgba(0,0,0,0.25)",
+								gap: 4,
+								boxShadow: "0 2px 12px rgba(0,0,0,0.35)",
 								zIndex: 100,
 							}}
 						>
-							<ToolBtn
+							<button
 								onClick={handleScrollBegin}
-								style={{ color: "#007aff" }}
-								title="Start scroll capture"
+								style={{
+									height: 28,
+									padding: "0 14px",
+									border: "none",
+									borderRadius: 6,
+									background: "#007aff",
+									color: "#fff",
+									fontSize: 12,
+									fontWeight: 600,
+									cursor: "pointer",
+									fontFamily: "inherit",
+								}}
 							>
-								▶ Start
-							</ToolBtn>
-							<ToolBtn
+								Start
+							</button>
+							<button
 								onClick={handleScrollCancel}
-								style={{ color: "#e00" }}
-								title="Cancel"
+								style={{
+									height: 28,
+									padding: "0 12px",
+									border: "none",
+									borderRadius: 6,
+									background: "rgba(255,255,255,0.95)",
+									color: "#333",
+									fontSize: 12,
+									fontWeight: 600,
+									cursor: "pointer",
+									fontFamily: "inherit",
+								}}
 							>
-								<X size={18} />
-							</ToolBtn>
+								Cancel
+							</button>
 						</div>
 					)}
 

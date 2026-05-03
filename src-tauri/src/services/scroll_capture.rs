@@ -1,4 +1,5 @@
 use crate::error::{AppError, Result};
+use crate::services::screen_capture::ScreenCaptureService;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -402,7 +403,7 @@ impl ScrollCaptureService {
             s.selection_rect = Some(rect);
         }
 
-        let (first_data, _frame_w, frame_h) = Self::capture_region(x, y, width, height)?;
+        let (first_data, _frame_w, frame_h) = ScreenCaptureService::capture_region(x, y, width, height)?;
         let first_image = image::load_from_memory(&first_data)
             .map_err(|e| AppError::ScreenCapture(format!("decode first frame: {}", e)))?
             .to_rgba8();
@@ -443,7 +444,7 @@ impl ScrollCaptureService {
             // ===== IDLE PHASE: wait for scroll =====
             thread::sleep(Duration::from_millis(CAPTURE_INTERVAL_DEFAULT_MS));
 
-            let (curr_data, _, _) = match Self::capture_region(x, y, width, height) {
+            let (curr_data, _, _) = match ScreenCaptureService::capture_region(x, y, width, height) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("[scroll] idle capture failed: {}", e);
@@ -502,7 +503,7 @@ impl ScrollCaptureService {
 
                 thread::sleep(Duration::from_millis(CAPTURE_INTERVAL_FAST_MS));
 
-                let (next_data, _, _) = match Self::capture_region(x, y, width, height) {
+                let (next_data, _, _) = match ScreenCaptureService::capture_region(x, y, width, height) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
@@ -589,9 +590,9 @@ impl ScrollCaptureService {
     }
 
     fn emit_progress(stitched: &image::RgbaImage, frame_count: u32, app_handle: &tauri::AppHandle) {
-        let thumb_h = 300u32;
+        let thumb_h = 400u32; // taller for better preview
         let thumb_w = (stitched.width() as f64 * (thumb_h as f64 / stitched.height() as f64)).round() as u32;
-        let thumb = image::imageops::resize(stitched, thumb_w.max(1), thumb_h, image::imageops::FilterType::Triangle);
+        let thumb = image::imageops::resize(stitched, thumb_w.max(1), thumb_h, image::imageops::FilterType::Lanczos3); // sharper
         let mut thumb_bytes = Vec::new();
         thumb.write_to(&mut std::io::Cursor::new(&mut thumb_bytes), image::ImageFormat::Png).ok();
         let thumbnail = base64::engine::general_purpose::STANDARD.encode(&thumb_bytes);

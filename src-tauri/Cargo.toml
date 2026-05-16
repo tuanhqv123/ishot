@@ -1,6 +1,6 @@
 [package]
 name = "ishot"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [build-dependencies]
@@ -27,6 +27,9 @@ core-foundation = "0.10"
 png = "0.17"
 dirs = "5"
 chrono = "0.4"
+tauri-plugin-updater = "2.10"
+tauri-plugin-process = "2.3"
+tauri-plugin-notification = "2.3"
 
 [profile.release]
 strip = true

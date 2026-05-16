@@ -198,6 +198,68 @@ fn shortcut_to_display(shortcut: &Shortcut) -> String {
     parts.join("")
 }
 
+/// Check the updater endpoint, download + install if a newer signed bundle
+/// is available, then restart the app.
+///
+/// All user-facing status flows through `Notification` so the menu-bar app
+/// stays out of the way — there's no main window we can drop a dialog into.
+/// Errors fall through to a "couldn't check" notification rather than
+/// being silently swallowed.
+async fn check_for_updates(app: tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    use tauri_plugin_notification::NotificationExt;
+
+    // Helper closure so each branch can fire a notification without repeating
+    // the title + summary key.
+    let notify = |body: &str| {
+        let _ = app
+            .notification()
+            .builder()
+            .title("iShot")
+            .body(body)
+            .show();
+    };
+
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("[updater] failed to construct updater: {}", e);
+            notify("Couldn't check for updates.");
+            return;
+        }
+    };
+
+    match updater.check().await {
+        Ok(Some(update)) => {
+            notify(&format!(
+                "Downloading update {} → installing…",
+                update.version
+            ));
+            // `download_and_install` streams the signed archive, verifies the
+            // signature against `pubkey` in tauri.conf.json, swaps the .app on
+            // disk, and returns. We then restart via the app handle.
+            let result = update
+                .download_and_install(|_chunk, _total| {}, || {})
+                .await;
+            match result {
+                Ok(_) => {
+                    notify("Update installed. Restarting…");
+                    app.restart();
+                }
+                Err(e) => {
+                    eprintln!("[updater] install failed: {}", e);
+                    notify("Update download failed.");
+                }
+            }
+        }
+        Ok(None) => notify("You're on the latest version."),
+        Err(e) => {
+            eprintln!("[updater] check failed: {}", e);
+            notify("Couldn't reach the update server.");
+        }
+    }
+}
+
 fn main() {
     // Load saved config
     let config = load_config();
@@ -220,6 +282,9 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--hidden"])))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             use crate::services::screen_capture::ScreenCaptureService;
 
@@ -268,10 +333,11 @@ fn main() {
             let shortcut_i = MenuItem::with_id(app, "shortcut", format!("Shortcut: {}  ▸", shortcut_display), true, None::<&str>)?;
             let separator1 = PredefinedMenuItem::separator(app)?;
             let launch_i = CheckMenuItem::with_id(app, "launch_at_login", "Launch at Login", true, is_enabled, None::<&str>)?;
+            let check_update_i = MenuItem::with_id(app, "check_update", "Check for Updates…", true, None::<&str>)?;
             let separator2 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit iShot", true, None::<&str>)?;
-            
-            let menu = Menu::with_items(app, &[&shortcut_i, &separator1, &launch_i, &separator2, &quit_i])?;
+
+            let menu = Menu::with_items(app, &[&shortcut_i, &separator1, &launch_i, &check_update_i, &separator2, &quit_i])?;
 
             let shortcut_item = shortcut_i.clone();
             
@@ -300,6 +366,15 @@ fn main() {
                             } else {
                                 let _ = autostart.enable();
                             }
+                        }
+                        "check_update" => {
+                            // Spawn the updater check so we don't block the menu
+                            // event handler. Status (found / up-to-date / error)
+                            // surfaces as native notifications.
+                            let app_handle = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                check_for_updates(app_handle).await;
+                            });
                         }
                         "quit" => {
                             app.exit(0);

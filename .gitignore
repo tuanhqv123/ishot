@@ -171,3 +171,7 @@ ehthumbs.db
 Thumbs.db
 pnpm-lock.yaml
 .opencode/package-lock.json
+/.tauri/
+ishot.key
+ishot.key.pub
+*.key

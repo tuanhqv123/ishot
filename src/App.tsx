@@ -697,6 +697,32 @@ function App() {
 		await cancelCapture();
 	}, [cancelCapture]);
 
+	// Finalize an in-progress scroll capture: stitch whatever's been collected
+	// so far, copy the result to the clipboard, and tear down the windows.
+	//
+	// This is what Esc does mid-scroll — the user's mental model is "I've seen
+	// enough, give me the image now" rather than "throw it away". The discard
+	// path (handleScrollCancel) stays bound to the Cancel button and to Esc
+	// while the panel is still in its pre-Start ready state.
+	const handleScrollFinalize = useCallback(async () => {
+		try {
+			const result = await invoke<{ width: number; height: number } | null>(
+				"finalize_scroll_to_clipboard",
+			);
+			if (result) {
+				new Notification("iShot", {
+					body: `Scroll capture saved (${result.width}x${result.height})`,
+				});
+			}
+		} catch (e) {
+			console.error("[scroll] finalize failed:", e);
+		}
+		try { await invoke("hide_scroll_panel"); } catch (e) { console.error(e); }
+		try { await invoke("hide_scroll_border"); } catch (e) { console.error(e); }
+		setScrollCapturing(false);
+		await cancelCapture();
+	}, [cancelCapture]);
+
 	// Listen for cancel from any overlay window
 	useEffect(() => {
 		const unlisten = listen("cancel-capture", () => {
@@ -792,7 +818,16 @@ function App() {
 			}
 			if (e.key === "Escape") {
 				if (scrollCapturing) {
-					handleScrollCancel();
+					// scrollFrames > 0 means the user has already pressed Start and the
+					// capture loop has stitched at least one step — Esc here means
+					// "save what we have" (finalize → clipboard), not throw it away.
+					// Before Start (panel still in its ready state, frame count 0),
+					// Esc keeps its previous meaning of cancel.
+					if (scrollFrames > 0) {
+						handleScrollFinalize();
+					} else {
+						handleScrollCancel();
+					}
 					return;
 				}
 				cancelCapture();
@@ -825,6 +860,9 @@ function App() {
 		editingTextId,
 		handleUndo,
 		scrollCapturing,
+		scrollFrames,
+		handleScrollCancel,
+		handleScrollFinalize,
 	]);
 
 	useEffect(() => {

@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
+use crate::services::accessibility::check_accessibility;
 use crate::services::scroll_capture::{
     AutoScrollConfig, ScrollCaptureService, ScrollCaptureState, ScrollCaptureResult,
 };
@@ -72,6 +73,16 @@ pub async fn start_auto_scroll_capture(
         let s = state.lock().unwrap();
         s.selection_rect.ok_or("No selection rect prepared")?
     };
+
+    // Auto-scroll dispatches CGScrollEvents to drive the focused window's
+    // scrollbar. macOS gates that capability behind the Accessibility
+    // permission — without it, the post calls silently no-op and the user
+    // sees a frozen panel. Prompt now so the OS surfaces its consent
+    // dialog AND registers the app in Privacy & Security on first use.
+    if !check_accessibility(true) {
+        return Err("accessibility-required".into());
+    }
+
     let config = AutoScrollConfig {
         speed_pps: speed_pps.unwrap_or(600).max(50).min(2000),
         max_height: max_height.unwrap_or(20_000).max(1_000).min(200_000),

@@ -676,9 +676,23 @@ function App() {
 			});
 		} catch (e) {
 			console.error("[scroll] auto-start failed:", e);
+			// Backend returns the sentinel "accessibility-required" when the
+			// macOS Accessibility permission is missing. The OS has already
+			// surfaced its consent dialog at this point — we just need to
+			// tear the panel down and tell the user what to do next.
+			if (typeof e === "string" && e.includes("accessibility-required")) {
+				new Notification("iShot — Accessibility permission needed", {
+					body:
+						"Enable iShot under System Settings → Privacy & Security → Accessibility, then try Scroll Capture again.",
+				});
+				try { await invoke("hide_scroll_panel"); } catch {}
+				try { await invoke("hide_scroll_border"); } catch {}
+				await cancelCapture();
+				return;
+			}
 			setScrollCapturing(false);
 		}
-	}, [selection, monitors, scrollSpeedPps]);
+	}, [selection, monitors, scrollSpeedPps, cancelCapture]);
 
 	// Cancel scroll (before or during capture)
 	const handleScrollCancel = useCallback(async () => {

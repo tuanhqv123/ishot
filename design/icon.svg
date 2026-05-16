@@ -1,24 +1,33 @@
 <!--
-  iShot app icon — outline daisy on solid-black squircle.
-  No outer border; the daisy is pure white outline. Black-fills the petal
-  interior so the shape reads as outline-only against the black ground.
+  iShot app icon — Apple HIG-compliant sizing.
+
+  macOS app icons live on a 1024×1024 canvas with the actual artwork
+  occupying the inner 824×824 (100 px padding on each side). The squircle
+  tile uses corner radius ~185 (≈22.4 % of 824). This padding is what
+  makes the icon read at the same visual size as system apps in Dock,
+  Launchpad and Finder — fill-the-canvas icons look 20 % oversized.
+
+  Content: solid-black squircle, 8-petal white-outline daisy, white pistil.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- Solid black squircle background -->
-  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="#000000"/>
+  <!-- Solid black squircle. Inset 100 px on each side → 824×824 -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="#000000"/>
 
-  <!-- 8 daisy petals: white outline, black fill so interior reads as "hollow" -->
-  <g fill="#000000" stroke="#ffffff" stroke-width="36" stroke-linejoin="round">
-    <g transform="rotate(0 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
-    <g transform="rotate(45 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
-    <g transform="rotate(90 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
-    <g transform="rotate(135 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
-    <g transform="rotate(180 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
-    <g transform="rotate(225 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
-    <g transform="rotate(270 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
-    <g transform="rotate(315 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
+  <!-- Daisy petals scaled to match the 824 content area.
+       Original petal at 1024-fill: rx=68 ry=148 offset 168 stroke 36.
+       Scale factor 824/1024 = 0.8047 →
+         rx=55, ry=119, offset (center 512 → cy=377), stroke 29. -->
+  <g fill="#000000" stroke="#ffffff" stroke-width="29" stroke-linejoin="round">
+    <g transform="rotate(0 512 512)"><ellipse cx="512" cy="377" rx="55" ry="119"/></g>
+    <g transform="rotate(45 512 512)"><ellipse cx="512" cy="377" rx="55" ry="119"/></g>
+    <g transform="rotate(90 512 512)"><ellipse cx="512" cy="377" rx="55" ry="119"/></g>
+    <g transform="rotate(135 512 512)"><ellipse cx="512" cy="377" rx="55" ry="119"/></g>
+    <g transform="rotate(180 512 512)"><ellipse cx="512" cy="377" rx="55" ry="119"/></g>
+    <g transform="rotate(225 512 512)"><ellipse cx="512" cy="377" rx="55" ry="119"/></g>
+    <g transform="rotate(270 512 512)"><ellipse cx="512" cy="377" rx="55" ry="119"/></g>
+    <g transform="rotate(315 512 512)"><ellipse cx="512" cy="377" rx="55" ry="119"/></g>
   </g>
 
-  <!-- Pistil: solid white dot -->
-  <circle cx="512" cy="512" r="68" fill="#ffffff"/>
+  <!-- Pistil -->
+  <circle cx="512" cy="512" r="55" fill="#ffffff"/>
 </svg>

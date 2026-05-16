@@ -1259,7 +1259,15 @@ impl ScrollCaptureService {
         {
             let mut s = state.lock().unwrap();
             s.is_capturing = false;
-            s.stitched_image = None; // already on clipboard, drop the big buffer
+            // Only drop the buffer when WE wrote the clipboard. If the user
+            // is finalizing via Esc / Done, the outer command needs to
+            // `take()` this image after we set `is_capturing=false` — if we
+            // clear it here, outer's take() returns None and the clipboard
+            // never gets updated (leaving the prior session's image, which
+            // is the "paste keeps returning the FIRST session" bug).
+            if !already_finalized {
+                s.stitched_image = None;
+            }
         }
 
         // Close the dim/border window so the user isn't left staring at a

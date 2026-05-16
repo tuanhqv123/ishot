@@ -585,10 +585,8 @@ impl ScrollCaptureService {
             s.selection_rect = Some(rect);
         }
 
-        let (first_data, _frame_w, frame_h) = ScreenCaptureService::capture_region(x, y, width, height)?;
-        let first_image = image::load_from_memory(&first_data)
-            .map_err(|e| AppError::ScreenCapture(format!("decode first frame: {}", e)))?
-            .to_rgba8();
+        let first_image = ScreenCaptureService::capture_region_rgba(x, y, width, height)?;
+        let frame_h = first_image.height();
         println!("[scroll] first frame: {}x{} pixels", first_image.width(), first_image.height());
 
         let mut stitched = first_image.clone();
@@ -633,17 +631,13 @@ impl ScrollCaptureService {
             // ===== IDLE PHASE: wait for scroll =====
             thread::sleep(Duration::from_millis(CAPTURE_INTERVAL_DEFAULT_MS));
 
-            let (curr_data, _, _) = match ScreenCaptureService::capture_region(x, y, width, height) {
-                Ok(r) => r,
+            let curr_image = match ScreenCaptureService::capture_region_rgba(x, y, width, height) {
+                Ok(img) => img,
                 Err(e) => {
                     eprintln!("[scroll] idle capture failed: {}", e);
                     continue;
                 }
             };
-
-            let curr_image = image::load_from_memory(&curr_data)
-                .map_err(|e| AppError::ScreenCapture(format!("decode: {}", e)))?
-                .to_rgba8();
 
             // Quick check: did the screen change at all?
             if !Self::frames_differ(&prev_image, &curr_image) {
@@ -703,14 +697,10 @@ impl ScrollCaptureService {
                 };
                 thread::sleep(Duration::from_millis(sleep_ms));
 
-                let (next_data, _, _) = match ScreenCaptureService::capture_region(x, y, width, height) {
-                    Ok(r) => r,
+                let next_image = match ScreenCaptureService::capture_region_rgba(x, y, width, height) {
+                    Ok(img) => img,
                     Err(_) => continue,
                 };
-
-                let next_image = image::load_from_memory(&next_data)
-                    .map_err(|e| AppError::ScreenCapture(format!("decode: {}", e)))?
-                    .to_rgba8();
 
                 // Still scrolling?
                 if !Self::frames_differ(&prev_image, &next_image) {
@@ -898,10 +888,10 @@ impl ScrollCaptureService {
         Self::warp_cursor(cursor_anchor_logical.0, cursor_anchor_logical.1);
 
         // Capture frame 0 — this is the starting state, NO scroll yet.
-        let (first_data, _, frame_h_initial) = ScreenCaptureService::capture_region(x, y, width, height)?;
-        let first_image = image::load_from_memory(&first_data)
-            .map_err(|e| AppError::ScreenCapture(format!("decode first frame: {}", e)))?
-            .to_rgba8();
+        // Use the RGBA path which dispatches to native CGImage (default) or
+        // falls back to screencapture via ISHOT_CAPTURE=screencapture.
+        let first_image = ScreenCaptureService::capture_region_rgba(x, y, width, height)?;
+        let frame_h_initial = first_image.height();
 
         let mut stitched = first_image.clone();
         let mut prev_image = first_image.clone();
@@ -941,12 +931,34 @@ impl ScrollCaptureService {
         // Bigger step = risk of NCC overshoot if the app's scroll animation
         // doesn't fully commit. Lowe's ratio + sharp-cut blend keeps output
         // clean — verified by full test suite + live runs.
-        let step_logical: i32 = if config.speed_pps <= 350 { 60 }
+        let preset_step: i32 = if config.speed_pps <= 350 { 60 }
             else if config.speed_pps <= 800 { 280 }
             else { 500 };
+
+        // CRITICAL: clamp step so it never exceeds ~70% of the frame's logical
+        // height. If the dispatched scroll shifts content by MORE than a
+        // viewport, the next captured frame has NO overlap with the previous
+        // one — NCC can't align, and we miss (viewport − step × scale) pixels
+        // of content per step. Catastrophic gaps in the stitched output,
+        // especially noticeable when the user picked a small capture area
+        // with the Fast preset.
+        //
+        // Math: physical_step ≤ 0.7 × physical_frame_h
+        //       → step_logical ≤ 0.7 × (physical_frame_h / scale)
+        //                     = 0.7 × logical_frame_h (= `height` here)
+        // Floor at 30pt so we always make some progress.
+        let frame_cap = ((height * 0.7).round() as i32).max(30);
+        let step_logical: i32 = preset_step.min(frame_cap);
+
         let physical_step: u32 = step_logical as u32 * scale;
         let settle_ms = settle_ms_for_step(step_logical);
 
+        if step_logical < preset_step {
+            println!(
+                "[auto-scroll] step clamped: preset={}pt → {}pt (capped at 70% of {}-pt frame to prevent content gaps)",
+                preset_step, step_logical, height as i32
+            );
+        }
         println!(
             "[auto-scroll] inferred scale={} step={}pt settle={}ms speed={}pps (frame={}px / rect={}pt) → paste {} rows/step",
             scale, step_logical, settle_ms, config.speed_pps, frame_h_initial, height as i32, physical_step
@@ -997,18 +1009,12 @@ impl ScrollCaptureService {
             }
             thread::sleep(Duration::from_millis(settle_ms));
 
-            // Capture the now-scrolled frame.
-            let curr_data = match ScreenCaptureService::capture_region(x, y, width, height) {
-                Ok((d, _, _)) => d,
+            // Capture the now-scrolled frame via the dispatcher. Native path
+            // is ~7-10× faster than the legacy screencapture-subprocess path.
+            let curr_image = match ScreenCaptureService::capture_region_rgba(x, y, width, height) {
+                Ok(img) => img,
                 Err(e) => {
                     eprintln!("[auto-scroll] capture failed: {} — retrying", e);
-                    continue;
-                }
-            };
-            let curr_image = match image::load_from_memory(&curr_data) {
-                Ok(img) => img.to_rgba8(),
-                Err(e) => {
-                    eprintln!("[auto-scroll] decode failed: {} — retrying", e);
                     continue;
                 }
             };

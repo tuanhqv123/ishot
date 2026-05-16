@@ -1,5 +1,48 @@
 use tauri::Manager;
 
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+use cocoa::base::id;
+
+/// Set a Tauri window's NSWindow `sharingType` to None so it is INVISIBLE to
+/// screen-capture pipelines (screencapture, CGDisplayCreateImage, CGWindowList).
+///
+/// Critical for our scroll capture: the scroll_border overlay and the
+/// scroll_panel preview window are visual guides for the USER, not content we
+/// want to capture. Without this, if the panel/border overlaps the user's
+/// capture rect, the preview's own image ends up baked into the next captured
+/// frame — a recursive feedback loop where the preview displays previous
+/// previews of itself.
+///
+/// `NSWindowSharingType` values: None = 0, ReadOnly = 1 (default), ReadWrite = 2.
+///
+/// **Threading**: AppKit isn't thread-safe; we dispatch via Tauri's main-thread
+/// queue. The Tauri command itself runs on the async runtime worker pool, so
+/// calling NSWindow methods directly from here could (and apparently did)
+/// crash the process.
+#[cfg(target_os = "macos")]
+fn hide_window_from_screen_capture(
+    app_handle: &tauri::AppHandle,
+    label: &str,
+) {
+    let label = label.to_string();
+    let app = app_handle.clone();
+    let _ = app_handle.run_on_main_thread(move || {
+        let Some(win) = app.get_webview_window(&label) else { return };
+        #[allow(deprecated)]
+        let Ok(ns_ptr) = win.ns_window() else { return };
+        if ns_ptr.is_null() { return; }
+        let ns_win = ns_ptr as id;
+        unsafe {
+            // setSharingType: NSWindowSharingNone (= 0)
+            let _: () = msg_send![ns_win, setSharingType: 0u64];
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_window_from_screen_capture(_app_handle: &tauri::AppHandle, _label: &str) {}
+
 /// Show the overlay window for screenshot selection
 #[tauri::command]
 pub async fn show_overlay(app_handle: tauri::AppHandle) -> Result<(), String> {
@@ -122,6 +165,10 @@ pub async fn show_scroll_panel(
     .build()
     .map_err(|e| format!("Failed to create scroll panel: {}", e))?;
 
+    // Hide from screen-capture pipelines so the panel's own preview doesn't
+    // end up baked into the next captured frame (recursive feedback loop).
+    hide_window_from_screen_capture(&app_handle, "scroll_panel");
+
     Ok(())
 }
 
@@ -213,6 +260,11 @@ pub async fn show_scroll_border(
 
     border_window.set_ignore_cursor_events(true)
         .map_err(|e| format!("Failed to set cursor passthrough: {}", e))?;
+
+    // Hide the dim/border overlay from screen-capture pipelines. Otherwise the
+    // box-shadow dim layer can subtly tint the captured frame, and the white
+    // border would bake into every frame if it ever overlaps the rect edges.
+    hide_window_from_screen_capture(&app_handle, "scroll_border");
 
     Ok(())
 }

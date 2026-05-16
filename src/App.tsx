@@ -11,7 +11,8 @@ import {
 	Minus,
 	Pencil,
 	ScanText,
-	ArrowDownToLine,
+	ImageDown,
+	ChevronDown,
 	Square,
 	Type,
 	Undo2,
@@ -173,6 +174,7 @@ function App() {
 		setTranslatedText("");
 		setTranslateLoading(false);
 		setShowTranslate(false);
+		setTranslateSource("");
 		setLockedByOther(false);
 		setScrollCapturing(false);
 		setScrollFrames(0);
@@ -432,6 +434,35 @@ function App() {
 	const [translatedText, setTranslatedText] = useState("");
 	const [translateLoading, setTranslateLoading] = useState(false);
 	const [showTranslate, setShowTranslate] = useState(false);
+	// OCR'd source text from the most recent translate request. Persisted so
+	// that switching the target-language dropdown re-runs translation without
+	// re-running OCR (slow + lossy).
+	const [translateSource, setTranslateSource] = useState("");
+	const [translateTarget, setTranslateTarget] = useState<string>(
+		() => localStorage.getItem("ishot-translate-target") || "vi",
+	);
+
+	// Pure translate call (no OCR). Used by handleTranslate AND by the
+	// language-dropdown change handler in the result dialog.
+	const runTranslation = useCallback(
+		async (sourceText: string, target: string) => {
+			setTranslateLoading(true);
+			setTranslatedText("");
+			try {
+				const result = await invoke<{
+					translated: string;
+					source_lang: string;
+					target_lang: string;
+				}>("translate_text", { text: sourceText, targetLang: target });
+				setTranslatedText(result.translated);
+			} catch (e) {
+				setTranslatedText("Translation failed: " + e);
+			} finally {
+				setTranslateLoading(false);
+			}
+		},
+		[],
+	);
 
 	const handleTranslate = useCallback(async () => {
 		if (displayCaptures.length === 0 || !selection || translateLoading) return;
@@ -439,7 +470,7 @@ function App() {
 		setShowTranslate(true);
 		setTranslatedText("");
 		try {
-			// OCR the selection first
+			// OCR the selection first.
 			const dc = findDisplay();
 			if (!dc) return;
 			const canvas = document.createElement("canvas");
@@ -473,29 +504,39 @@ function App() {
 				ocrResult.full_text || ocrResult.blocks.map((b) => b.text).join(" ");
 			if (!sourceText.trim()) {
 				setTranslatedText("(No text detected)");
+				setTranslateLoading(false);
 				return;
 			}
-			// Translate — auto-detect to English (or Vietnamese if source is English)
-			const targetLang = /^[a-zA-Z\s.,!?'"()-]+$/.test(sourceText)
-				? "vi"
+			setTranslateSource(sourceText);
+			// Pick initial target language: if source looks ASCII (likely English) →
+			// translate to current preference (default vi); else → en.
+			const initialTarget = /^[a-zA-Z\s.,!?'"()-]+$/.test(sourceText)
+				? translateTarget
 				: "en";
-			const result = await invoke<{
-				translated: string;
-				source_lang: string;
-				target_lang: string;
-			}>("translate_text", { text: sourceText, targetLang });
-			setTranslatedText(result.translated);
+			setTranslateTarget(initialTarget);
+			await runTranslation(sourceText, initialTarget);
 		} catch (e) {
 			setTranslatedText("Translation failed: " + e);
-		} finally {
 			setTranslateLoading(false);
 		}
-	}, [displayCaptures, selection, translateLoading, findDisplay]);
+	}, [
+		displayCaptures,
+		selection,
+		translateLoading,
+		findDisplay,
+		runTranslation,
+		translateTarget,
+	]);
 
 	const handleToolChange = useCallback(
 		(newTool: Tool) => {
 			setTool(newTool);
 			setSelectedAnnotation(null);
+			// Picking ANY annotation tool exits scroll-ready mode. Without this,
+			// the scroll-shot icon stays highlighted even after switching to e.g.
+			// Rect — two tools appearing selected at the same time.
+			setScrollCapturing(false);
+			setScrollFrames(0);
 			if (newTool === "text" && textBlocks.length === 0 && !ocrLoading)
 				performOcr();
 			if (newTool !== "text") {
@@ -641,16 +682,20 @@ function App() {
 
 	// Cancel scroll (before or during capture)
 	const handleScrollCancel = useCallback(async () => {
-		try {
-			await invoke("cancel_scroll_capture");
-			await invoke("hide_scroll_panel");
-			await invoke("hide_scroll_border");
-		} catch (e) {
-			console.error("[scroll] cancel failed:", e);
-		}
+		// Teardown order matters:
+		//   1. Stop the auto-scroll capture thread (if running).
+		//   2. Hide the per-session panel/border windows.
+		//   3. Hand off to cancelCapture() — this is what Esc does after
+		//      shortcut. It emits cancel-capture (so other overlay windows
+		//      reset), resets React state, AND hides the main overlay. Without
+		//      step 3 the user was left with the dimmed selection overlay still
+		//      visible — same bug they reported as "Cancel doesn't exit like Esc".
+		try { await invoke("cancel_scroll_capture"); } catch (e) { console.error(e); }
+		try { await invoke("hide_scroll_panel"); } catch (e) { console.error(e); }
+		try { await invoke("hide_scroll_border"); } catch (e) { console.error(e); }
 		setScrollCapturing(false);
-		resetState();
-	}, [resetState]);
+		await cancelCapture();
+	}, [cancelCapture]);
 
 	// Listen for cancel from any overlay window
 	useEffect(() => {
@@ -1679,246 +1724,22 @@ function App() {
 						onMouseUp={handleCanvasMouseUp}
 					/>
 
-					{/* Scroll capture: Start/Cancel bar (replaces normal toolbar) */}
-					{scrollCapturing && scrollFrames === 0 && (() => {
-						// Three discrete speed steps. Higher = fewer frames per total
-						// scroll height but more risk of mid-animation capture.
-						const SPEEDS: Array<{ label: string; pps: number }> = [
-							{ label: "Slow", pps: 300 },
-							{ label: "Medium", pps: 600 },
-							{ label: "Fast", pps: 1200 },
-						];
-						const activeIdx = Math.max(
-							0,
-							SPEEDS.findIndex((s) => s.pps === scrollSpeedPps),
-						);
-						const setStep = (idx: number) => {
-							const clamped = Math.max(0, Math.min(SPEEDS.length - 1, idx));
-							const pps = SPEEDS[clamped].pps;
-							setScrollSpeedPps(pps);
-							localStorage.setItem("ishot-scroll-speed", String(pps));
-						};
-						const PANEL_W = 248;
-						const PANEL_GAP = 10;
-						// Place panel to the RIGHT of the selection by default.
-						// If right side doesn't have room → fall back to LEFT side.
-						// If neither side has room → fall back to BELOW (centered).
-						const rightX = selection.x + selection.width + PANEL_GAP;
-						const leftX = selection.x - PANEL_W - PANEL_GAP;
-						const winW = window.innerWidth;
-						const winH = window.innerHeight;
-						let panelLeft: number;
-						let panelTop: number;
-						if (rightX + PANEL_W <= winW - 4) {
-							panelLeft = rightX;
-							panelTop = Math.max(4, Math.min(selection.y, winH - 140));
-						} else if (leftX >= 4) {
-							panelLeft = leftX;
-							panelTop = Math.max(4, Math.min(selection.y, winH - 140));
-						} else {
-							panelLeft = Math.max(4, selection.x + selection.width / 2 - PANEL_W / 2);
-							panelTop = selection.y + selection.height + 8;
-						}
-						return (
-							<div
-								style={{
-									position: "absolute",
-									left: panelLeft,
-									top: panelTop,
-									width: PANEL_W,
-									background: "rgba(255,255,255,0.97)",
-									borderRadius: 10,
-									padding: "12px 14px 10px",
-									display: "flex",
-									flexDirection: "column",
-									gap: 10,
-									boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
-									zIndex: 100,
-									backdropFilter: "blur(12px)",
-									WebkitBackdropFilter: "blur(12px)",
-								}}
-							>
-								{/*
-								 * 3-step speed slider. Native range input gives keyboard +
-								 * snap-to-step for free; we overlay 3 tick marks and labels
-								 * so it reads as discrete stops, not a continuous slider.
-								 */}
-								<div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-									<div
-										style={{
-											display: "flex",
-											justifyContent: "space-between",
-											alignItems: "baseline",
-										}}
-									>
-										<span
-											style={{
-												fontSize: 11,
-												fontWeight: 600,
-												color: "rgba(0,0,0,0.55)",
-												letterSpacing: "0.02em",
-											}}
-										>
-											Speed
-										</span>
-										<span
-											style={{
-												fontSize: 11,
-												fontWeight: 600,
-												color: "#1c1c1e",
-											}}
-										>
-											{SPEEDS[activeIdx].label}
-										</span>
-									</div>
-									{/*
-									  * Slider: 3 dots evenly spaced on a track. Using flexbox
-									  * with `space-between` to position dots — dot 0 at left,
-									  * dot 1 at center, dot 2 at right. Track is a single
-									  * absolute-positioned line drawn behind them.
-									  */}
-									<div
-										style={{
-											position: "relative",
-											height: 28,
-											display: "flex",
-											alignItems: "center",
-										}}
-									>
-										{/* Track */}
-										<div
-											style={{
-												position: "absolute",
-												top: "50%",
-												left: 6,
-												right: 6,
-												height: 2,
-												background: "rgba(0,0,0,0.12)",
-												borderRadius: 1,
-												transform: "translateY(-50%)",
-											}}
-										/>
-										{/* Filled portion (from start to active dot) */}
-										{activeIdx > 0 && (
-											<div
-												style={{
-													position: "absolute",
-													top: "50%",
-													left: 6,
-													width: `calc(${(activeIdx / (SPEEDS.length - 1)) * 100}% - 12px)`,
-													height: 2,
-													background: "#007aff",
-													borderRadius: 1,
-													transform: "translateY(-50%)",
-												}}
-											/>
-										)}
-										{/* Tick dots */}
-										<div
-											style={{
-												position: "relative",
-												display: "flex",
-												justifyContent: "space-between",
-												alignItems: "center",
-												width: "100%",
-												zIndex: 1,
-											}}
-										>
-											{SPEEDS.map((_, i) => {
-												const active = i <= activeIdx;
-												const isCurrent = i === activeIdx;
-												return (
-													<div
-														key={i}
-														onClick={() => setStep(i)}
-														style={{
-															width: isCurrent ? 14 : 10,
-															height: isCurrent ? 14 : 10,
-															borderRadius: "50%",
-															background: active ? "#007aff" : "rgba(0,0,0,0.18)",
-															border: isCurrent ? "2px solid #fff" : "none",
-															boxSizing: "border-box",
-															cursor: "pointer",
-															boxShadow: isCurrent ? "0 2px 6px rgba(0,122,255,0.6)" : "none",
-															transition: "all 120ms ease",
-														}}
-													/>
-												);
-											})}
-										</div>
-									</div>
-									{/* Step labels */}
-									<div
-										style={{
-											display: "flex",
-											justifyContent: "space-between",
-											fontSize: 9.5,
-											color: "rgba(0,0,0,0.5)",
-											fontWeight: 500,
-											marginTop: 1,
-										}}
-									>
-										{SPEEDS.map((s) => (
-											<span key={s.label}>{s.label}</span>
-										))}
-									</div>
-								</div>
 
-								{/* Start + Cancel at bottom-RIGHT (not stretched). */}
-								<div
-									style={{
-										display: "flex",
-										gap: 6,
-										marginTop: 2,
-										justifyContent: "flex-end",
-									}}
-								>
-									<button
-										onClick={handleScrollCancel}
-										style={{
-											height: 28,
-											padding: "0 14px",
-											border: "none",
-											borderRadius: 6,
-											background: "rgba(0,0,0,0.06)",
-											color: "rgba(0,0,0,0.75)",
-											fontSize: 12,
-											fontWeight: 600,
-											cursor: "pointer",
-											fontFamily: "inherit",
-										}}
-									>
-										Cancel
-									</button>
-									<button
-										onClick={handleScrollBegin}
-										style={{
-											height: 28,
-											padding: "0 16px",
-											border: "none",
-											borderRadius: 6,
-											background: "#007aff",
-											color: "#fff",
-											fontSize: 12,
-											fontWeight: 600,
-											cursor: "pointer",
-											fontFamily: "inherit",
-										}}
-									>
-										Start
-									</button>
-								</div>
-							</div>
-						);
-					})()}
-
-					{/* Normal Toolbars — flip above if no space below */}
-					{!scrollCapturing &&
-						(() => {
+					{/* Toolbars — flip above if no space below.
+					    Row 1 always shows tool buttons.
+					    Row 2 shows tool-specific options (color/size/etc.) OR the
+					    scroll-shot speed selector + Start/Cancel when the user
+					    has clicked the scroll-capture icon.
+					    Critically: the main toolbar stays visible in scroll-shot
+					    "ready" state so the user doesn't lose context — the speed
+					    selector simply takes the place of the regular options row. */}
+					{(() => {
 							const FONT_SIZES = [
 								10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48,
 							];
+							const inScrollReady = scrollCapturing && scrollFrames === 0;
 							const hasRow2 =
+								inScrollReady ||
 								tool === "rect" ||
 								tool === "oval" ||
 								tool === "arrow" ||
@@ -2035,8 +1856,12 @@ function App() {
 												<ScanText size={18} />
 											)}
 										</ToolBtn>
-										<ToolBtn onClick={handleStartScroll} title="Scroll capture">
-											<ArrowDownToLine size={18} />
+										<ToolBtn
+											active={inScrollReady}
+											onClick={handleStartScroll}
+											title="Scroll capture"
+										>
+											<ImageDown size={18} />
 										</ToolBtn>
 										<ToolBtn
 											onClick={handleTranslate}
@@ -2077,18 +1902,188 @@ function App() {
 											<Check size={18} />
 										</ToolBtn>
 									</div>
-									{/* Row 2: Options bar — separate floating bar below */}
+									{/* Row 2: Options bar — separate floating bar below.
+									    Scroll-shot uses TALLER card with two internal rows
+									    (speed on top, Cancel/Start on bottom right) — all inside
+									    one white card like the translate dialog's content panel. */}
 									{hasRow2 && (
 										<div
 											style={{
 												...barStyle,
 												top: row2Top,
-												padding: "4px 6px",
-												height: 36,
+												padding: inScrollReady ? "8px 10px" : "4px 6px",
+												height: inScrollReady ? undefined : 36,
+												flexDirection: inScrollReady
+													? ("column" as const)
+													: ("row" as const),
+												alignItems: inScrollReady
+													? ("stretch" as const)
+													: ("center" as const),
+												gap: inScrollReady ? 8 : 3,
 											}}
 										>
+											{/* Scroll-shot speed: HORIZONTAL track with 3 vertical
+											    tick-mark stops. Row 2 holds ONLY the speed control —
+											    Cancel/Start float as separate buttons in the
+											    transparent area BELOW the toolbar (see further down). */}
+											{inScrollReady && (() => {
+												const SPEEDS: Array<{ label: string; pps: number }> = [
+													{ label: "Slow", pps: 300 },
+													{ label: "Medium", pps: 600 },
+													{ label: "Fast", pps: 1200 },
+												];
+												const activeIdx = Math.max(
+													0,
+													SPEEDS.findIndex((s) => s.pps === scrollSpeedPps),
+												);
+												const pick = (pps: number) => {
+													setScrollSpeedPps(pps);
+													localStorage.setItem("ishot-scroll-speed", String(pps));
+												};
+												const TRACK_W = 130;
+												return (
+													<>
+														{/* Inner row 1: speed track */}
+														<div
+															style={{
+																display: "flex",
+																alignItems: "center",
+																gap: 3,
+															}}
+														>
+															<span
+																style={{
+																	fontSize: 11,
+																	fontWeight: 600,
+																	color: "rgba(0,0,0,0.55)",
+																	padding: "0 6px 0 2px",
+																}}
+															>
+																Speed
+															</span>
+															<div
+																style={{
+																	position: "relative",
+																	width: TRACK_W,
+																	height: 26,
+																	display: "flex",
+																	alignItems: "center",
+																	padding: "0 6px",
+																}}
+															>
+																{/* Horizontal track */}
+																<div
+																	style={{
+																		position: "absolute",
+																		top: "50%",
+																		left: 6,
+																		right: 6,
+																		height: 2,
+																		background: "rgba(0,0,0,0.16)",
+																		borderRadius: 1,
+																		transform: "translateY(-50%)",
+																	}}
+																/>
+																{activeIdx > 0 && (
+																	<div
+																		style={{
+																			position: "absolute",
+																			top: "50%",
+																			left: 6,
+																			width: `calc(${(activeIdx / (SPEEDS.length - 1)) * 100}% - 12px)`,
+																			height: 2,
+																			background: "#007aff",
+																			borderRadius: 1,
+																			transform: "translateY(-50%)",
+																		}}
+																	/>
+																)}
+																<div
+																	style={{
+																		position: "relative",
+																		display: "flex",
+																		justifyContent: "space-between",
+																		alignItems: "center",
+																		width: "100%",
+																		zIndex: 1,
+																	}}
+																>
+																	{SPEEDS.map((s, i) => {
+																		const active = i <= activeIdx;
+																		const isCurrent = i === activeIdx;
+																		return (
+																			<div
+																				key={s.pps}
+																				onClick={() => pick(s.pps)}
+																				title={s.label}
+																				style={{
+																					width: 3,
+																					height: isCurrent ? 16 : 10,
+																					borderRadius: 1.5,
+																					background: active
+																						? "#007aff"
+																						: "rgba(0,0,0,0.32)",
+																					cursor: "pointer",
+																					boxShadow: isCurrent
+																						? "0 1px 3px rgba(0,122,255,0.5)"
+																						: "none",
+																					transition: "all 120ms ease",
+																				}}
+																			/>
+																		);
+																	})}
+																</div>
+															</div>
+														</div>
+														{/* Inner row 2: Cancel + Start, right-aligned
+														    inside the same white card. */}
+														<div
+															style={{
+																display: "flex",
+																justifyContent: "flex-end",
+																gap: 6,
+															}}
+														>
+															<button
+																onClick={handleScrollCancel}
+																style={{
+																	height: 26,
+																	padding: "0 14px",
+																	border: "none",
+																	borderRadius: 5,
+																	background: "rgba(0,0,0,0.06)",
+																	color: "rgba(0,0,0,0.78)",
+																	fontSize: 12,
+																	fontWeight: 600,
+																	cursor: "pointer",
+																	fontFamily: "inherit",
+																}}
+															>
+																Cancel
+															</button>
+															<button
+																onClick={handleScrollBegin}
+																style={{
+																	height: 26,
+																	padding: "0 16px",
+																	border: "none",
+																	borderRadius: 5,
+																	background: "#007aff",
+																	color: "#fff",
+																	fontSize: 12,
+																	fontWeight: 600,
+																	cursor: "pointer",
+																	fontFamily: "inherit",
+																}}
+															>
+																Start
+															</button>
+														</div>
+													</>
+												);
+											})()}
 											{/* Stroke width for shape tools */}
-											{isShapeTool && (
+											{!inScrollReady && isShapeTool && (
 												<>
 													<DropPicker
 														value={strokeWidth}
@@ -2225,6 +2220,7 @@ function App() {
 												))}
 										</div>
 									)}
+
 								</>
 							);
 						})()}
@@ -2320,14 +2316,32 @@ function App() {
 							}}
 						/>
 					)}
-					{/* Translate result */}
-					{showTranslate && !translateLoading && translatedText && (
+					{/* Translate result — positioned to the RIGHT of the selection
+					    (or LEFT if no room on the right). Never inside, so it
+					    doesn't obscure the source text. */}
+					{showTranslate &&
+						// Show whenever we have a result OR we're re-translating a
+						// previously OCR'd source via the dropdown. Initial OCR phase
+						// (no source yet, loading) still hides the dialog — the
+						// spinner over the selection covers that case.
+						(translatedText || (translateLoading && translateSource)) && (() => {
+						const TR_W = Math.min(Math.max(selection.width, 280), 420);
+						const TR_GAP = 12;
+						const rightX = selection.x + selection.width + TR_GAP;
+						const leftX = selection.x - TR_W - TR_GAP;
+						const trLeft = rightX + TR_W <= window.innerWidth - 10
+							? rightX
+							: leftX >= 10
+								? leftX
+								: Math.max(10, selection.x); // last-resort fallback
+						const trTop = Math.max(10, selection.y);
+						return (
 						<div
 							style={{
 								position: "absolute",
-								left: Math.max(10, selection.x),
-								top: Math.max(10, selection.y + 30),
-								width: Math.min(Math.max(selection.width, 280), 420),
+								left: trLeft,
+								top: trTop,
+								width: TR_W,
 								display: "flex",
 								flexDirection: "column",
 								gap: 4,
@@ -2340,8 +2354,53 @@ function App() {
 									borderRadius: 8,
 									padding: 12,
 									boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+									display: "flex",
+									flexDirection: "column",
+									gap: 10,
 								}}
 							>
+								{/* Target-language dropdown — re-translates the same OCR'd
+								    source text when changed (no re-OCR). Uses the custom
+								    LangPicker to match the rest of the app's controls. */}
+								<div
+									style={{
+										display: "flex",
+										alignItems: "center",
+										gap: 8,
+										fontSize: 11,
+										color: "rgba(0,0,0,0.55)",
+										fontWeight: 600,
+									}}
+								>
+									<span>Translate to</span>
+									<LangPicker
+										value={translateTarget}
+										disabled={translateLoading && !translateSource}
+										onChange={(t) => {
+											setTranslateTarget(t);
+											localStorage.setItem("ishot-translate-target", t);
+											if (translateSource) {
+												runTranslation(translateSource, t);
+											}
+										}}
+										options={[
+											{ value: "en", label: "English" },
+											{ value: "vi", label: "Tiếng Việt" },
+											{ value: "zh", label: "中文 (简体)" },
+											{ value: "zh-TW", label: "中文 (繁體)" },
+											{ value: "ja", label: "日本語" },
+											{ value: "ko", label: "한국어" },
+											{ value: "es", label: "Español" },
+											{ value: "fr", label: "Français" },
+											{ value: "de", label: "Deutsch" },
+											{ value: "ru", label: "Русский" },
+											{ value: "th", label: "ไทย" },
+											{ value: "id", label: "Bahasa Indonesia" },
+											{ value: "pt", label: "Português" },
+											{ value: "ar", label: "العربية" },
+										]}
+									/>
+								</div>
 								<div
 									style={{
 										fontSize: 13,
@@ -2351,9 +2410,16 @@ function App() {
 										wordBreak: "break-word",
 										userSelect: "text",
 										cursor: "text",
+										minHeight: 20,
 									}}
 								>
-									{translatedText}
+									{translateLoading && translateSource ? (
+										<span style={{ color: "rgba(0,0,0,0.4)" }}>
+											Translating…
+										</span>
+									) : (
+										translatedText
+									)}
 								</div>
 							</div>
 							<div
@@ -2404,7 +2470,8 @@ function App() {
 								</button>
 							</div>
 						</div>
-					)}
+						);
+					})()}
 
 					<style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 				</>
@@ -2523,6 +2590,124 @@ function DropPicker({
 							}}
 						>
 							{renderOption ? renderOption(v) : `${v}px`}
+						</button>
+					))}
+				</div>
+			)}
+		</div>
+	);
+}
+
+/**
+ * Compact custom dropdown for string values. Matches the visual style of
+ * `DropPicker` (button + popover menu, blue active state, click-outside to
+ * close) but accepts arbitrary string-labelled options. Used by the translate
+ * dialog's target-language selector.
+ *
+ * Layout note: when `align="right"` the popover anchors to the right edge of
+ * the trigger button instead of the default left edge, useful when the
+ * trigger sits at the right side of its container.
+ */
+function LangPicker({
+	value,
+	options,
+	onChange,
+	disabled,
+	align = "left",
+}: {
+	value: string;
+	options: { value: string; label: string }[];
+	onChange: (v: string) => void;
+	disabled?: boolean;
+	align?: "left" | "right";
+}) {
+	const [open, setOpen] = useState(false);
+	const ref = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		if (!open) return;
+		const close = (e: MouseEvent) => {
+			if (ref.current && !ref.current.contains(e.target as Node)) {
+				setOpen(false);
+			}
+		};
+		document.addEventListener("mousedown", close);
+		return () => document.removeEventListener("mousedown", close);
+	}, [open]);
+	const currentLabel =
+		options.find((o) => o.value === value)?.label ?? value;
+	return (
+		<div ref={ref} style={{ position: "relative", display: "inline-block" }}>
+			<button
+				onClick={() => !disabled && setOpen(!open)}
+				disabled={disabled}
+				style={{
+					height: 24,
+					minWidth: 110,
+					borderRadius: 5,
+					border: "none",
+					fontSize: 12,
+					padding: "0 8px",
+					cursor: disabled ? "default" : "pointer",
+					background: open ? "#007aff" : "rgba(0,0,0,0.06)",
+					color: open ? "#fff" : "#1c1c1e",
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "space-between",
+					gap: 6,
+					fontFamily: "inherit",
+					fontWeight: 600,
+					opacity: disabled ? 0.5 : 1,
+				}}
+			>
+				<span>{currentLabel}</span>
+				<ChevronDown size={12} />
+			</button>
+			{open && (
+				<div
+					style={{
+						position: "absolute",
+						top: "100%",
+						[align]: 0,
+						marginTop: 4,
+						background: "rgba(255,255,255,0.98)",
+						borderRadius: 6,
+						padding: 3,
+						boxShadow: "0 6px 24px rgba(0,0,0,0.22)",
+						zIndex: 300,
+						display: "flex",
+						flexDirection: "column",
+						gap: 1,
+						minWidth: 140,
+						maxHeight: 280,
+						overflowY: "auto",
+					}}
+				>
+					{options.map((opt) => (
+						<button
+							key={opt.value}
+							onClick={() => {
+								onChange(opt.value);
+								setOpen(false);
+							}}
+							style={{
+								height: 26,
+								border: "none",
+								borderRadius: 4,
+								fontSize: 12,
+								padding: "0 10px",
+								background: opt.value === value ? "#007aff" : "transparent",
+								color: opt.value === value ? "#fff" : "#1c1c1e",
+								cursor: "pointer",
+								fontFamily: "inherit",
+								display: "flex",
+								alignItems: "center",
+								whiteSpace: "nowrap",
+								textAlign: "left",
+								justifyContent: "flex-start",
+								fontWeight: opt.value === value ? 600 : 500,
+							}}
+						>
+							{opt.label}
 						</button>
 					))}
 				</div>

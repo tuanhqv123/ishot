@@ -275,8 +275,16 @@ fn main() {
 
             let shortcut_item = shortcut_i.clone();
             
+            // Load the dedicated tray_icon.png (monochrome daisy on transparent
+            // BG) and mark it as a macOS template image. With `icon_as_template`
+            // true the system tints the icon white on dark menubars and black
+            // on light menubars automatically — Apple HIG compliant.
+            let tray_icon_bytes = include_bytes!("../icons/tray_icon.png");
+            let tray_icon = tauri::image::Image::from_bytes(tray_icon_bytes)
+                .expect("failed to decode tray icon");
             let _tray = TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
+                .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(move |app, event| {

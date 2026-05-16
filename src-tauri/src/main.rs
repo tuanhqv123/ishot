@@ -333,11 +333,12 @@ fn main() {
             let shortcut_i = MenuItem::with_id(app, "shortcut", format!("Shortcut: {}  ▸", shortcut_display), true, None::<&str>)?;
             let separator1 = PredefinedMenuItem::separator(app)?;
             let launch_i = CheckMenuItem::with_id(app, "launch_at_login", "Launch at Login", true, is_enabled, None::<&str>)?;
+            let clipboard_i = MenuItem::with_id(app, "clipboard_history", "Clipboard History  ⌘⇧V", true, None::<&str>)?;
             let check_update_i = MenuItem::with_id(app, "check_update", "Check for Updates…", true, None::<&str>)?;
             let separator2 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit iShot", true, None::<&str>)?;
 
-            let menu = Menu::with_items(app, &[&shortcut_i, &separator1, &launch_i, &check_update_i, &separator2, &quit_i])?;
+            let menu = Menu::with_items(app, &[&shortcut_i, &separator1, &launch_i, &clipboard_i, &check_update_i, &separator2, &quit_i])?;
 
             let shortcut_item = shortcut_i.clone();
             
@@ -366,6 +367,9 @@ fn main() {
                             } else {
                                 let _ = autostart.enable();
                             }
+                        }
+                        "clipboard_history" => {
+                            toggle_clipboard_history_window(app);
                         }
                         "check_update" => {
                             // Spawn the updater check so we don't block the menu
@@ -398,6 +402,18 @@ fn main() {
                     trigger_screenshot(&app_handle_for_shortcut);
                 }
             })?;
+
+            // Cmd+Shift+V — toggle clipboard history window.
+            let clipboard_shortcut = Shortcut::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyV);
+            let app_handle_for_clipboard = app.handle().clone();
+            app.global_shortcut().on_shortcut(clipboard_shortcut, move |_app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    toggle_clipboard_history_window(&app_handle_for_clipboard);
+                }
+            })?;
+
+            // Start clipboard polling thread.
+            services::clipboard_history::start_polling(app.handle().clone());
 
             // Listen for shortcut changes
             let state_for_event = state.clone();
@@ -477,6 +493,13 @@ fn main() {
             commands::scroll_capture::finalize_scroll_to_clipboard,
             commands::scroll_capture::cancel_scroll_capture,
             commands::scroll_capture::get_scroll_capture_state,
+            commands::clipboard_history::list_clipboard_history,
+            commands::clipboard_history::read_clipboard_text,
+            commands::clipboard_history::copy_clipboard_item,
+            commands::clipboard_history::delete_clipboard_item,
+            commands::clipboard_history::clear_clipboard_history,
+            commands::clipboard_history::toggle_clipboard_pause,
+            commands::clipboard_history::is_clipboard_paused,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -517,6 +540,18 @@ fn request_screen_recording_permission() {
         if !has_access {
             let granted = CGRequestScreenCaptureAccess();
             println!("Permission request result: {}", granted);
+        }
+    }
+}
+
+fn toggle_clipboard_history_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("clipboard_history") {
+        let visible = win.is_visible().unwrap_or(false);
+        if visible {
+            let _ = win.hide();
+        } else {
+            let _ = win.show();
+            let _ = win.set_focus();
         }
     }
 }

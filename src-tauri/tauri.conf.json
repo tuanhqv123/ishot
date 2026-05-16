@@ -36,6 +36,18 @@
         "resizable": true,
         "skipTaskbar": true,
         "visible": false
+      },
+      {
+        "label": "clipboard_history",
+        "title": "Clipboard History",
+        "url": "clipboard-history.html",
+        "width": 480,
+        "height": 600,
+        "resizable": true,
+        "decorations": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false
       }
     ],
     "security": {

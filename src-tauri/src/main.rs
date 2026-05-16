@@ -500,6 +500,8 @@ fn main() {
             commands::clipboard_history::clear_clipboard_history,
             commands::clipboard_history::toggle_clipboard_pause,
             commands::clipboard_history::is_clipboard_paused,
+            commands::window_enum::snapshot_windows,
+            commands::window_enum::find_window_at,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

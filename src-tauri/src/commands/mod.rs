@@ -5,3 +5,4 @@ pub mod ocr;
 pub mod translate;
 pub mod scroll_capture;
 pub mod clipboard_history;
+pub mod window_enum;

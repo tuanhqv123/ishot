@@ -1,0 +1,23 @@
+<!--
+  Favicon variant — fills the entire 1024 canvas with no Apple-HIG inset.
+  Reason: browser tabs render favicons at 16-32 px without adding any
+  surrounding padding of their own; the macOS-style 100 px inner padding
+  shrinks the visible mark to ~24/32 px on a 32 px favicon — looks tiny.
+
+  Layout is the same brand mark (squircle + 8-petal daisy + white pistil),
+  just scaled up so it reads cleanly at small sizes.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="#000000"/>
+  <g fill="#000000" stroke="#ffffff" stroke-width="44" stroke-linejoin="round">
+    <g transform="rotate(0 512 512)"><ellipse cx="512" cy="296" rx="88" ry="188"/></g>
+    <g transform="rotate(45 512 512)"><ellipse cx="512" cy="296" rx="88" ry="188"/></g>
+    <g transform="rotate(90 512 512)"><ellipse cx="512" cy="296" rx="88" ry="188"/></g>
+    <g transform="rotate(135 512 512)"><ellipse cx="512" cy="296" rx="88" ry="188"/></g>
+    <g transform="rotate(180 512 512)"><ellipse cx="512" cy="296" rx="88" ry="188"/></g>
+    <g transform="rotate(225 512 512)"><ellipse cx="512" cy="296" rx="88" ry="188"/></g>
+    <g transform="rotate(270 512 512)"><ellipse cx="512" cy="296" rx="88" ry="188"/></g>
+    <g transform="rotate(315 512 512)"><ellipse cx="512" cy="296" rx="88" ry="188"/></g>
+  </g>
+  <circle cx="512" cy="512" r="88" fill="#ffffff"/>
+</svg>

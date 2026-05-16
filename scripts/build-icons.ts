@@ -73,6 +73,23 @@ async function buildApp() {
 	console.log("  icon.icns");
 }
 
+async function buildFavicon() {
+	const src = path.join(ROOT, "design", "favicon.svg");
+	console.log("Favicon →");
+	// Browser-tab favicons live at 16-32 px most of the time; 192 covers the
+	// PWA / "Add to Home Screen" case. All three share the same fill-canvas
+	// SVG (no Apple-HIG padding) so the mark stays readable at thumbnail size.
+	const sizes: Array<[string, number]> = [
+		["favicon-16.png", 16],
+		["favicon-32.png", 32],
+		["favicon-48.png", 48],
+		["favicon-192.png", 192],
+	];
+	for (const [name, size] of sizes) {
+		await rasterize(src, path.join(ICONS_DIR, name), size);
+	}
+}
+
 async function buildTray() {
 	const src = path.join(ROOT, "design", "tray.svg");
 	console.log("Tray icon →");
@@ -85,5 +102,6 @@ async function buildTray() {
 }
 
 await buildApp();
+await buildFavicon();
 await buildTray();
 console.log("\nDone. Icons written to src-tauri/icons/");

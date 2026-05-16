@@ -1,22 +1,14 @@
 <!--
-  iShot app icon — outline daisy in white squircle.
-  Black-on-white, no color accent (user preference).
-
-  Geometry (1024×1024):
-    - Rounded rect inset by 64px on each side (squircle-ish r=224, ≈22% of 1024)
-    - 8 petals: vertical ellipses rotated around center, rx=64 ry=136, offset 168
-    - Stroke weight 40px so petals stay legible at 32×32
-    - Pistil: solid black disk, r=68
-
-  Why outline-only daisy: matches SF Symbols / iOS 17+ vibe (user request).
+  iShot app icon — outline daisy on solid-black squircle.
+  No outer border; the daisy is pure white outline. Black-fills the petal
+  interior so the shape reads as outline-only against the black ground.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- App background: white squircle with black border -->
-  <rect x="64" y="64" width="896" height="896" rx="224" ry="224"
-        fill="#ffffff" stroke="#000000" stroke-width="48"/>
+  <!-- Solid black squircle background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="#000000"/>
 
-  <!-- 8 daisy petals, each a vertical ellipse rotated around center -->
-  <g fill="#ffffff" stroke="#000000" stroke-width="36" stroke-linejoin="round">
+  <!-- 8 daisy petals: white outline, black fill so interior reads as "hollow" -->
+  <g fill="#000000" stroke="#ffffff" stroke-width="36" stroke-linejoin="round">
     <g transform="rotate(0 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
     <g transform="rotate(45 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
     <g transform="rotate(90 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
@@ -27,6 +19,6 @@
     <g transform="rotate(315 512 512)"><ellipse cx="512" cy="344" rx="68" ry="148"/></g>
   </g>
 
-  <!-- Pistil -->
-  <circle cx="512" cy="512" r="68" fill="#000000"/>
+  <!-- Pistil: solid white dot -->
+  <circle cx="512" cy="512" r="68" fill="#ffffff"/>
 </svg>

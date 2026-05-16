@@ -1,32 +1,65 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <title>iShot · Scroll dim</title>
     <style>
-      * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
       html, body {
         background: transparent !important;
         overflow: hidden;
-        -webkit-user-select: none;
-        user-select: none;
         width: 100%;
         height: 100%;
         pointer-events: none;
+        -webkit-user-select: none;
+        user-select: none;
       }
-      .border {
-        width: 100%;
-        height: 100%;
-        border: 2px solid #fff;
-        box-shadow: 0 0 0 1px rgba(0,0,0,0.3), inset 0 0 0 1px rgba(0,0,0,0.1);
+      /*
+        The captured rect must stay PIXEL-PERFECT — the 2px border must sit
+        ENTIRELY outside the capture area, otherwise screencapture picks it up
+        and you get white stripes through every stitched frame.
+
+        Implementation: we make the .hole div bigger than the capture rect by
+        `BORDER` pixels on every side, positioned `BORDER` to the left/up. With
+        box-sizing: border-box and a `BORDER`-px border, the transparent inner
+        area is EXACTLY the capture rect — the border ink sits one pixel ring
+        outside it, untouched by screencapture.
+
+        The box-shadow then paints the dim layer from the OUTER edge of the
+        div outward, so the dim doesn't overlap with the border either.
+      */
+      /*
+        IMPORTANT: do NOT add any `inset` box-shadow here, and the border must
+        live ENTIRELY in the outset-2px ring we position around the rect (see
+        the JS below). Any ink painted inside the capture rect — even a 1-px
+        25%-opacity line — gets composited over the screen and grabbed by
+        `screencapture`, producing horizontal dark stripes through every
+        stitch boundary. We learned this the hard way.
+      */
+      .hole {
+        position: absolute;
+        border: 2px solid rgba(255, 255, 255, 0.95);
+        box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.42);
         pointer-events: none;
       }
     </style>
   </head>
   <body>
-    <div class="border"></div>
+    <div class="hole" id="hole"></div>
+    <script>
+      const BORDER = 2; // keep in sync with .hole border width
+      const p = new URLSearchParams(location.search);
+      const x = parseInt(p.get("x") || "0", 10);
+      const y = parseInt(p.get("y") || "0", 10);
+      const w = parseInt(p.get("w") || "0", 10);
+      const h = parseInt(p.get("h") || "0", 10);
+      const hole = document.getElementById("hole");
+      // Shift outward by BORDER and grow by 2*BORDER so the transparent inner
+      // area (= the capture rect) is untouched by the border ink.
+      hole.style.left = (x - BORDER) + "px";
+      hole.style.top = (y - BORDER) + "px";
+      hole.style.width = (w + BORDER * 2) + "px";
+      hole.style.height = (h + BORDER * 2) + "px";
+    </script>
   </body>
 </html>

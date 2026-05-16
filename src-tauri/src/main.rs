@@ -102,7 +102,8 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
             let _ = overlay.set_size(tauri::Size::Logical(tauri::LogicalSize::new(m.width, m.height)));
         }
         let _ = overlay.show();
-        let _ = overlay.set_focus();
+        // NOTE: intentionally no set_focus() — see CLAUDE.md. The overlay must appear on top
+        // of any active app without stealing keyboard focus from it.
     }
 
     // Create or reuse overlay windows for secondary monitors
@@ -209,6 +210,11 @@ fn main() {
     }));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // Second launch blocked. Trigger a capture in the existing instance so the user gets a useful response.
+            eprintln!("[single-instance] duplicate launch blocked");
+            trigger_screenshot(app);
+        }))
         .manage(std::sync::Arc::new(std::sync::Mutex::new(ScrollCaptureState::default())))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -383,7 +389,9 @@ fn main() {
             commands::translate::translate_text,
             commands::scroll_capture::prepare_scroll_capture,
             commands::scroll_capture::start_scroll_capture,
+            commands::scroll_capture::start_auto_scroll_capture,
             commands::scroll_capture::stop_scroll_capture,
+            commands::scroll_capture::finalize_scroll_to_clipboard,
             commands::scroll_capture::cancel_scroll_capture,
             commands::scroll_capture::get_scroll_capture_state,
         ])

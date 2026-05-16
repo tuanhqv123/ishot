@@ -22,7 +22,7 @@ base64 = "0.22"
 thiserror = "1.0"
 image = "0.25"
 arboard = { version = "3.4", features = ["image-data"] }
-core-graphics = "0.24"
+core-graphics = { version = "0.24", features = ["highsierra"] }
 core-foundation = "0.10"
 png = "0.17"
 dirs = "5"

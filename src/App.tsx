@@ -11,7 +11,7 @@ import {
 	Minus,
 	Pencil,
 	ScanText,
-	Scroll,
+	ArrowDownToLine,
 	Square,
 	Type,
 	Undo2,
@@ -124,7 +124,12 @@ function App() {
 	const [lockedByOther, setLockedByOther] = useState(false);
 	const [scrollCapturing, setScrollCapturing] = useState(false);
 	const [scrollFrames, setScrollFrames] = useState(0);
-	const [showScreenshot, setShowScreenshot] = useState(true);
+	// Auto-scroll speed in pixels-per-second. Presets: Slow=300, Medium=600, Fast=1200.
+	// Higher = faster total capture but more risk of mid-animation captures.
+	const [scrollSpeedPps, setScrollSpeedPps] = useState<number>(
+		() => Number(localStorage.getItem("ishot-scroll-speed")) || 600,
+	);
+	const [showScreenshot] = useState(true);
 
 	// Color picker
 	const COLORS = [
@@ -170,6 +175,7 @@ function App() {
 		setShowTranslate(false);
 		setLockedByOther(false);
 		setScrollCapturing(false);
+		setScrollFrames(0);
 		dragStartRef.current = null;
 	}, []);
 
@@ -502,11 +508,35 @@ function App() {
 
 	useEffect(() => {
 		const unlistenClear = listen("screenshot-clear", () => {
+			// Full reset — never leak state from a previous capture session into
+			// the next one. The scroll-capture state in particular is critical:
+			// stale scrollCapturing/scrollFrames hides the toolbar AND the dim overlay.
 			setDisplayCaptures([]);
 			setStage("idle");
+			setSelection(null);
+			setAnnotations([]);
+			setTextBlocks([]);
+			setSelectedText("");
+			setSelectedBlockIndices(new Set());
+			setTool(null);
+			setSelectedAnnotation(null);
+			setTempBlur(null);
+			setScrollCapturing(false);
+			setScrollFrames(0);
+			setLockedByOther(false);
 		});
 		return () => { unlistenClear.then((fn) => fn()); };
 	}, []);
+
+	// Scroll panel emits this when its Done/Cancel cleanup runs. Same reset path —
+	// it's what guarantees the overlay window is in a clean state for the NEXT
+	// capture, even if no shortcut is pressed in between.
+	useEffect(() => {
+		const unlistenDone = listen("scroll-capture-done", () => {
+			resetState();
+		});
+		return () => { unlistenDone.then((fn) => fn()); };
+	}, [resetState]);
 
 	useEffect(() => {
 		const unlisten = listen<{
@@ -560,24 +590,54 @@ function App() {
 		}
 	}, [selection, findDisplay, monitors]);
 
-	// Click Start button → hide overlay, show border window, show scroll panel, begin capture
+	// Click Start button → hide overlay, show border + panel, kick off AUTO-SCROLL.
+	//
+	// Auto-scroll path means: Rust dispatches CGScrollEvents to the window under
+	// the cursor and pastes captured frames at KNOWN offsets (no NCC needed).
+	// We must position the cursor over the capture region so scroll events land
+	// in the right window — that's the `cursor_anchor_*` payload.
 	const handleScrollBegin = useCallback(async () => {
 		if (!selection) return;
 		try {
+			const monitorIdx = getWindowMonitorIndex();
+			const mon = monitors[monitorIdx];
+			const monX = mon?.x ?? 0;
+			const monY = mon?.y ?? 0;
+			// SCREEN-space (logical-screen) coords. Two windows need to know
+			// about these: the scroll-border (so it draws on the right monitor)
+			// and the cursor warp (so scroll events land in the right app).
+			//
+			// Previously we passed selection.x/y (LOCAL to the overlay window)
+			// to show_scroll_border, which then treated those as screen coords
+			// — fine on the primary monitor (offset 0,0), broken on monitor 2
+			// (the border ended up on monitor 1 at the wrong place).
+			const screenX = monX + selection.x;
+			const screenY = monY + selection.y;
+			const anchorX = screenX + selection.width / 2;
+			const anchorY = screenY + selection.height / 2;
+
 			await invoke("hide_overlay");
 			await invoke("show_scroll_border", {
-				x: selection.x,
-				y: selection.y,
+				x: screenX,
+				y: screenY,
 				width: selection.width,
 				height: selection.height,
 			});
-			await invoke("show_scroll_panel");
-			await invoke("start_scroll_capture");
+			await invoke("show_scroll_panel", {
+				anchorMonitorX: monX,
+				anchorMonitorY: monY,
+			});
+			await invoke("start_auto_scroll_capture", {
+				cursorAnchorX: anchorX,
+				cursorAnchorY: anchorY,
+				speedPps: scrollSpeedPps,
+				maxHeight: 20000,
+			});
 		} catch (e) {
-			console.error("[scroll] start failed:", e);
+			console.error("[scroll] auto-start failed:", e);
 			setScrollCapturing(false);
 		}
-	}, [selection]);
+	}, [selection, monitors, scrollSpeedPps]);
 
 	// Cancel scroll (before or during capture)
 	const handleScrollCancel = useCallback(async () => {
@@ -603,7 +663,12 @@ function App() {
 		};
 	}, [resetState]);
 
-	// Scroll capture auto-stop from backend (5s no scroll)
+	// Auto-stop / auto-finalize event from backend.
+	//
+	// NOTE: with the auto-scroll path, Rust copies the RGBA directly to the
+	// clipboard before emitting this event — `payload.data` will be empty.
+	// Don't re-copy here (empty array is JS-truthy, would cause "0 bytes"
+	// noise in logs). Only show notification + clean up windows.
 	useEffect(() => {
 		const unlisten = listen("scroll-capture-result", async (event) => {
 			const payload = event.payload as {
@@ -611,8 +676,13 @@ function App() {
 				width: number;
 				height: number;
 			};
-			if (payload.data) {
+			// Only re-copy from JS if Rust didn't already handle it (legacy
+			// manual-scroll path). Length check is what distinguishes — auto
+			// path sends `data: []`, legacy sends a full PNG byte array.
+			if (payload.data && payload.data.length > 0) {
 				await invoke("copy_to_clipboard", { imageBytes: payload.data });
+			}
+			if (payload.width && payload.height) {
 				new Notification("iShot", {
 					body: `Scroll capture saved (${payload.width}x${payload.height})`,
 				});
@@ -1360,8 +1430,10 @@ function App() {
 				/>
 			)}
 
-			{/* Dark overlay with clip - hide during scroll mode so user can see screen */}
-			{selection && selection.width > 0 && !scrollCapturing && (
+			{/* Dark overlay with clip — also shown in scroll-ready state so the user sees
+			    exactly what's about to be captured. Once active scroll begins, the overlay
+			    window is hidden by Rust (replaced by the scroll-border dim window). */}
+			{selection && selection.width > 0 && (
 				<div
 					style={{
 						position: "absolute",
@@ -1608,57 +1680,237 @@ function App() {
 					/>
 
 					{/* Scroll capture: Start/Cancel bar (replaces normal toolbar) */}
-					{scrollCapturing && scrollFrames === 0 && (
-						<div
-							style={{
-								position: "absolute",
-								left: Math.max(4, selection.x + selection.width / 2 - 100),
-								top: selection.y + selection.height + 8,
-								background: "rgba(30,30,30,0.85)",
-								borderRadius: 8,
-								padding: "5px 6px",
-								display: "flex",
-								gap: 4,
-								boxShadow: "0 2px 12px rgba(0,0,0,0.35)",
-								zIndex: 100,
-							}}
-						>
-							<button
-								onClick={handleScrollBegin}
+					{scrollCapturing && scrollFrames === 0 && (() => {
+						// Three discrete speed steps. Higher = fewer frames per total
+						// scroll height but more risk of mid-animation capture.
+						const SPEEDS: Array<{ label: string; pps: number }> = [
+							{ label: "Slow", pps: 300 },
+							{ label: "Medium", pps: 600 },
+							{ label: "Fast", pps: 1200 },
+						];
+						const activeIdx = Math.max(
+							0,
+							SPEEDS.findIndex((s) => s.pps === scrollSpeedPps),
+						);
+						const setStep = (idx: number) => {
+							const clamped = Math.max(0, Math.min(SPEEDS.length - 1, idx));
+							const pps = SPEEDS[clamped].pps;
+							setScrollSpeedPps(pps);
+							localStorage.setItem("ishot-scroll-speed", String(pps));
+						};
+						const PANEL_W = 248;
+						const PANEL_GAP = 10;
+						// Place panel to the RIGHT of the selection by default.
+						// If right side doesn't have room → fall back to LEFT side.
+						// If neither side has room → fall back to BELOW (centered).
+						const rightX = selection.x + selection.width + PANEL_GAP;
+						const leftX = selection.x - PANEL_W - PANEL_GAP;
+						const winW = window.innerWidth;
+						const winH = window.innerHeight;
+						let panelLeft: number;
+						let panelTop: number;
+						if (rightX + PANEL_W <= winW - 4) {
+							panelLeft = rightX;
+							panelTop = Math.max(4, Math.min(selection.y, winH - 140));
+						} else if (leftX >= 4) {
+							panelLeft = leftX;
+							panelTop = Math.max(4, Math.min(selection.y, winH - 140));
+						} else {
+							panelLeft = Math.max(4, selection.x + selection.width / 2 - PANEL_W / 2);
+							panelTop = selection.y + selection.height + 8;
+						}
+						return (
+							<div
 								style={{
-									height: 28,
-									padding: "0 14px",
-									border: "none",
-									borderRadius: 6,
-									background: "#007aff",
-									color: "#fff",
-									fontSize: 12,
-									fontWeight: 600,
-									cursor: "pointer",
-									fontFamily: "inherit",
+									position: "absolute",
+									left: panelLeft,
+									top: panelTop,
+									width: PANEL_W,
+									background: "rgba(255,255,255,0.97)",
+									borderRadius: 10,
+									padding: "12px 14px 10px",
+									display: "flex",
+									flexDirection: "column",
+									gap: 10,
+									boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
+									zIndex: 100,
+									backdropFilter: "blur(12px)",
+									WebkitBackdropFilter: "blur(12px)",
 								}}
 							>
-								Start
-							</button>
-							<button
-								onClick={handleScrollCancel}
-								style={{
-									height: 28,
-									padding: "0 12px",
-									border: "none",
-									borderRadius: 6,
-									background: "rgba(255,255,255,0.95)",
-									color: "#333",
-									fontSize: 12,
-									fontWeight: 600,
-									cursor: "pointer",
-									fontFamily: "inherit",
-								}}
-							>
-								Cancel
-							</button>
-						</div>
-					)}
+								{/*
+								 * 3-step speed slider. Native range input gives keyboard +
+								 * snap-to-step for free; we overlay 3 tick marks and labels
+								 * so it reads as discrete stops, not a continuous slider.
+								 */}
+								<div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+									<div
+										style={{
+											display: "flex",
+											justifyContent: "space-between",
+											alignItems: "baseline",
+										}}
+									>
+										<span
+											style={{
+												fontSize: 11,
+												fontWeight: 600,
+												color: "rgba(0,0,0,0.55)",
+												letterSpacing: "0.02em",
+											}}
+										>
+											Speed
+										</span>
+										<span
+											style={{
+												fontSize: 11,
+												fontWeight: 600,
+												color: "#1c1c1e",
+											}}
+										>
+											{SPEEDS[activeIdx].label}
+										</span>
+									</div>
+									{/*
+									  * Slider: 3 dots evenly spaced on a track. Using flexbox
+									  * with `space-between` to position dots — dot 0 at left,
+									  * dot 1 at center, dot 2 at right. Track is a single
+									  * absolute-positioned line drawn behind them.
+									  */}
+									<div
+										style={{
+											position: "relative",
+											height: 28,
+											display: "flex",
+											alignItems: "center",
+										}}
+									>
+										{/* Track */}
+										<div
+											style={{
+												position: "absolute",
+												top: "50%",
+												left: 6,
+												right: 6,
+												height: 2,
+												background: "rgba(0,0,0,0.12)",
+												borderRadius: 1,
+												transform: "translateY(-50%)",
+											}}
+										/>
+										{/* Filled portion (from start to active dot) */}
+										{activeIdx > 0 && (
+											<div
+												style={{
+													position: "absolute",
+													top: "50%",
+													left: 6,
+													width: `calc(${(activeIdx / (SPEEDS.length - 1)) * 100}% - 12px)`,
+													height: 2,
+													background: "#007aff",
+													borderRadius: 1,
+													transform: "translateY(-50%)",
+												}}
+											/>
+										)}
+										{/* Tick dots */}
+										<div
+											style={{
+												position: "relative",
+												display: "flex",
+												justifyContent: "space-between",
+												alignItems: "center",
+												width: "100%",
+												zIndex: 1,
+											}}
+										>
+											{SPEEDS.map((_, i) => {
+												const active = i <= activeIdx;
+												const isCurrent = i === activeIdx;
+												return (
+													<div
+														key={i}
+														onClick={() => setStep(i)}
+														style={{
+															width: isCurrent ? 14 : 10,
+															height: isCurrent ? 14 : 10,
+															borderRadius: "50%",
+															background: active ? "#007aff" : "rgba(0,0,0,0.18)",
+															border: isCurrent ? "2px solid #fff" : "none",
+															boxSizing: "border-box",
+															cursor: "pointer",
+															boxShadow: isCurrent ? "0 2px 6px rgba(0,122,255,0.6)" : "none",
+															transition: "all 120ms ease",
+														}}
+													/>
+												);
+											})}
+										</div>
+									</div>
+									{/* Step labels */}
+									<div
+										style={{
+											display: "flex",
+											justifyContent: "space-between",
+											fontSize: 9.5,
+											color: "rgba(0,0,0,0.5)",
+											fontWeight: 500,
+											marginTop: 1,
+										}}
+									>
+										{SPEEDS.map((s) => (
+											<span key={s.label}>{s.label}</span>
+										))}
+									</div>
+								</div>
+
+								{/* Start + Cancel at bottom-RIGHT (not stretched). */}
+								<div
+									style={{
+										display: "flex",
+										gap: 6,
+										marginTop: 2,
+										justifyContent: "flex-end",
+									}}
+								>
+									<button
+										onClick={handleScrollCancel}
+										style={{
+											height: 28,
+											padding: "0 14px",
+											border: "none",
+											borderRadius: 6,
+											background: "rgba(0,0,0,0.06)",
+											color: "rgba(0,0,0,0.75)",
+											fontSize: 12,
+											fontWeight: 600,
+											cursor: "pointer",
+											fontFamily: "inherit",
+										}}
+									>
+										Cancel
+									</button>
+									<button
+										onClick={handleScrollBegin}
+										style={{
+											height: 28,
+											padding: "0 16px",
+											border: "none",
+											borderRadius: 6,
+											background: "#007aff",
+											color: "#fff",
+											fontSize: 12,
+											fontWeight: 600,
+											cursor: "pointer",
+											fontFamily: "inherit",
+										}}
+									>
+										Start
+									</button>
+								</div>
+							</div>
+						);
+					})()}
 
 					{/* Normal Toolbars — flip above if no space below */}
 					{!scrollCapturing &&
@@ -1784,7 +2036,7 @@ function App() {
 											)}
 										</ToolBtn>
 										<ToolBtn onClick={handleStartScroll} title="Scroll capture">
-											<Scroll size={18} />
+											<ArrowDownToLine size={18} />
 										</ToolBtn>
 										<ToolBtn
 											onClick={handleTranslate}

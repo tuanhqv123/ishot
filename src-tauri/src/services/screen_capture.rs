@@ -167,7 +167,17 @@ impl ScreenCaptureService {
         ))
     }
 
-    /// Capture a region using screencapture CLI
+    /// Capture a region using screencapture CLI.
+    ///
+    /// NOTE: deliberately **does NOT** pass `-C` (capture cursor). Including the
+    /// cursor pointer in scroll-capture frames causes two problems:
+    ///   1. The cursor sits at a different position every frame → the NCC offset
+    ///      detector sees a moving white-arrow shape that isn't really content,
+    ///      reducing confidence and biasing the match.
+    ///   2. The cursor gets baked into the final stitched image as multiple
+    ///      ghost copies along the scroll path.
+    /// For one-shot screenshots (`capture_display`) we DO want the cursor, but
+    /// this function is only used by scroll capture.
     pub fn capture_region(x: f64, y: f64, width: f64, height: f64) -> Result<(Vec<u8>, u32, u32)> {
         let temp_path = format!("/tmp/ishot_scroll_{}.png", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -176,7 +186,7 @@ impl ScreenCaptureService {
         let region = format!("{},{},{},{}", x as i32, y as i32, width as i32, height as i32);
 
         let status = Command::new("screencapture")
-            .args(["-x", "-C", "-R", &region, &temp_path])
+            .args(["-x", "-R", &region, &temp_path])
             .status()
             .map_err(|e| AppError::ScreenCapture(format!("screencapture failed: {}", e)))?;
 

@@ -169,3 +169,5 @@ target/
 .Trashes
 ehthumbs.db
 Thumbs.db
+pnpm-lock.yaml
+.opencode/package-lock.json

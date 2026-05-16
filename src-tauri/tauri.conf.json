@@ -35,12 +35,15 @@
         "decorations": false,
         "resizable": true,
         "skipTaskbar": true,
-        "visible": false,
-        "focus": false
+        "visible": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["/tmp/ishot_*"]
+      }
     }
   },
   "bundle": {

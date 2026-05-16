@@ -77,3 +77,20 @@ pub async fn copy_to_clipboard(
     println!("[{:?}] ✅ Image copied to clipboard! Total: {:?}", start.elapsed(), start.elapsed());
     Ok(())
 }
+
+/// Copy text to clipboard
+#[tauri::command]
+pub async fn copy_text_to_clipboard(
+    text: String,
+    _app_handle: AppHandle,
+) -> std::result::Result<(), String> {
+    use arboard::Clipboard;
+
+    let mut clipboard = Clipboard::new()
+        .map_err(|e| format!("Failed to open clipboard: {}", e))?;
+
+    clipboard.set_text(text)
+        .map_err(|e| format!("Failed to set text to clipboard: {}", e))?;
+
+    Ok(())
+}

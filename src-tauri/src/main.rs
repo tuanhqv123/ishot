@@ -15,6 +15,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, Code,
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
+use crate::services::scroll_capture::ScrollCaptureState;
 
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
@@ -89,6 +90,9 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
     };
     println!("[monitors] count={} {:?}", monitors.len(), monitors);
 
+    // Clear old screenshot data first so overlay doesn't flash stale content
+    let _ = app.emit("screenshot-clear", ());
+
     // Show the main overlay on the primary monitor
     if let Some(overlay) = app.get_webview_window("overlay") {
         if let Some(m) = monitors.first() {
@@ -98,7 +102,8 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
             let _ = overlay.set_size(tauri::Size::Logical(tauri::LogicalSize::new(m.width, m.height)));
         }
         let _ = overlay.show();
-        let _ = overlay.set_focus();
+        // NOTE: intentionally no set_focus() — see CLAUDE.md. The overlay must appear on top
+        // of any active app without stealing keyboard focus from it.
     }
 
     // Create or reuse overlay windows for secondary monitors
@@ -106,6 +111,10 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
         let label = format!("overlay_{}", i);
         // Reuse existing window if present
         if let Some(existing) = app.get_webview_window(&label) {
+            let _ = existing.set_position(tauri::Position::Logical(
+                tauri::LogicalPosition::new(m.x, m.y),
+            ));
+            let _ = existing.set_size(tauri::Size::Logical(tauri::LogicalSize::new(m.width, m.height)));
             let _ = existing.show();
             continue;
         }
@@ -115,17 +124,19 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
             tauri::WebviewUrl::App("index.html".into()),
         )
         .title("")
-        .position(m.x, m.y)
         .inner_size(m.width, m.height)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
         .resizable(false)
-        .visible(true)
+        .visible(false)
         .focused(false);
 
         match builder.build() {
             Ok(win) => {
+                let _ = win.set_position(tauri::Position::Logical(
+                    tauri::LogicalPosition::new(m.x, m.y),
+                ));
                 #[cfg(target_os = "macos")]
                 #[allow(deprecated)]
                 if let Ok(ns_ptr) = win.ns_window() {
@@ -138,6 +149,7 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
                         );
                     }
                 }
+                let _ = win.show();
                 println!("[overlay_{}] created at ({},{} {}x{})", i, m.x, m.y, m.width, m.height);
             }
             Err(e) => eprintln!("[overlay_{}] failed: {}", i, e),
@@ -198,6 +210,12 @@ fn main() {
     }));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // Second launch blocked. Trigger a capture in the existing instance so the user gets a useful response.
+            eprintln!("[single-instance] duplicate launch blocked");
+            trigger_screenshot(app);
+        }))
+        .manage(std::sync::Arc::new(std::sync::Mutex::new(ScrollCaptureState::default())))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -289,7 +307,7 @@ fn main() {
             
             let shortcut = {
                 let s = state_for_shortcut.lock().unwrap();
-                s.current_shortcut.clone()
+                s.current_shortcut
             };
             
             app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
@@ -328,7 +346,7 @@ fn main() {
                     let _ = app_handle_for_event.global_shortcut().unregister_all();
                     
                     let app_for_handler = app_handle_for_event.clone();
-                    let _ = app_handle_for_event.global_shortcut().on_shortcut(new_shortcut.clone(), move |_app, _shortcut, event| {
+                    let _ = app_handle_for_event.global_shortcut().on_shortcut(new_shortcut, move |_app, _shortcut, event| {
                         if event.state == ShortcutState::Pressed {
                             trigger_screenshot(&app_for_handler);
                         }
@@ -359,10 +377,23 @@ fn main() {
             commands::screenshot::get_monitors_info,
             commands::window::show_overlay,
             commands::window::hide_overlay,
+            commands::window::set_overlay_passthrough,
+            commands::window::show_scroll_panel,
+            commands::window::hide_scroll_panel,
+            commands::window::show_scroll_border,
+            commands::window::hide_scroll_border,
             commands::file::copy_to_clipboard,
+            commands::file::copy_text_to_clipboard,
             commands::file::save_to_file,
             commands::ocr::perform_ocr,
             commands::translate::translate_text,
+            commands::scroll_capture::prepare_scroll_capture,
+            commands::scroll_capture::start_scroll_capture,
+            commands::scroll_capture::start_auto_scroll_capture,
+            commands::scroll_capture::stop_scroll_capture,
+            commands::scroll_capture::finalize_scroll_to_clipboard,
+            commands::scroll_capture::cancel_scroll_capture,
+            commands::scroll_capture::get_scroll_capture_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

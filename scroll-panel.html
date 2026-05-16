@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>iShot · Scroll capture</title>
+    <style>
+      :root {
+        --bg: rgba(28, 28, 30, 0.85);
+        --radius: 14px;
+        --text: #ffffff;
+        --text-dim: rgba(255, 255, 255, 0.55);
+        --warn: #ffcc00;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        background: transparent !important;
+        overflow: hidden;
+        -webkit-user-select: none;
+        user-select: none;
+        width: 100%;
+        height: 100%;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+        color: var(--text);
+      }
+      body {
+        display: flex;
+        align-items: flex-end;
+        justify-content: flex-end;
+        padding: 12px;
+      }
+      /* Panel itself is fully transparent — no background, no border, no
+         shadow. Only the preview image and the Esc hint are visible, floating
+         freely over whatever's behind the panel window. */
+      .panel {
+        position: relative;
+        width: 220px;
+        padding: 0;
+      }
+      /* Preview area: visible only when an image is loaded. No background
+         when empty so the panel is truly transparent. */
+      .preview {
+        position: relative;
+        width: 220px;
+        height: 280px;
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+      }
+      .preview:empty,
+      .preview.empty {
+        box-shadow: none;
+      }
+      .preview img {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        display: block;
+        pointer-events: none;
+        -webkit-user-drag: none;
+        user-select: none;
+      }
+      .placeholder {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1.45;
+        color: var(--text);
+        padding: 16px;
+        text-shadow: 0 2px 6px rgba(0, 0, 0, 0.85);
+        background: rgba(0, 0, 0, 0.32);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border-radius: 10px;
+        transition: opacity 200ms ease;
+      }
+      .placeholder.hidden { opacity: 0; pointer-events: none; }
+      .placeholder .icon { display: block; margin-bottom: 8px; font-size: 22px; line-height: 1; }
+      .placeholder.warn { color: var(--warn); }
+      /* Subtle Esc hint along the bottom of the panel. Only visible after the
+         first frame has been captured (panel switches from placeholder to
+         actual preview). */
+      .esc-hint {
+        margin-top: 8px;
+        text-align: center;
+        font-size: 10.5px;
+        color: rgba(255, 255, 255, 0.85);
+        letter-spacing: 0.02em;
+        font-weight: 500;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+      }
+      .esc-hint kbd {
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-family: inherit;
+        font-size: 10px;
+        font-weight: 600;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <div class="preview">
+        <img id="thumb" alt="" draggable="false" />
+        <div class="placeholder" id="msg">
+          <div>
+            <span class="icon">↓</span>
+            Auto-scrolling…
+          </div>
+        </div>
+      </div>
+      <div class="esc-hint">Press <kbd>Esc</kbd> to finish</div>
+    </div>
+
+    <script>
+      const T = window.__TAURI__;
+      let cleaned = false;
+      let warnTimer = null;
+      let gotFirstFrame = false;
+
+      const msgEl = document.getElementById("msg");
+      const thumbEl = document.getElementById("thumb");
+
+      function setMessage(html, kind) {
+        msgEl.innerHTML = html;
+        msgEl.classList.toggle("warn", kind === "warn");
+        msgEl.classList.remove("hidden");
+      }
+      function hideMessage() {
+        msgEl.classList.add("hidden");
+      }
+
+      function cleanup() {
+        if (cleaned) return;
+        cleaned = true;
+        T.event.emit("scroll-capture-done");
+        T.window.getCurrentWindow().close();
+      }
+
+      // FINISH = stop capture + copy result to clipboard.
+      async function finish() {
+        try {
+          const r = await T.core.invoke("finalize_scroll_to_clipboard");
+          if (r) new Notification("iShot", { body: `Saved ${r.width}×${r.height}` });
+        } catch (e) {
+          console.error(e);
+        } finally {
+          T.core.invoke("hide_scroll_border").catch(() => {});
+          cleanup();
+        }
+      }
+
+      // Esc anywhere = finish (Shottr-style). No buttons, no status row,
+      // no frame count — just the preview + this one keystroke.
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          finish();
+        }
+      });
+
+      T.event.listen("scroll-capture-progress", (ev) => {
+        const p = ev.payload;
+        if (p.thumbnail) {
+          thumbEl.src = "data:image/jpeg;base64," + p.thumbnail;
+          if (!gotFirstFrame) {
+            gotFirstFrame = true;
+            hideMessage();
+          }
+        }
+      });
+
+      T.event.listen("scroll-capture-warning", (ev) => {
+        if (ev.payload === "scroll-too-fast") {
+          setMessage(
+            '<div><span class="icon">⚠</span>Scroll slower<br>for clean stitching</div>',
+            "warn"
+          );
+          if (warnTimer) clearTimeout(warnTimer);
+          warnTimer = setTimeout(() => {
+            if (gotFirstFrame) hideMessage();
+          }, 2200);
+        }
+      });
+
+      T.event.listen("scroll-capture-result", (ev) => {
+        if (cleaned) return;
+        const d = ev.payload || {};
+        if (d.width && d.height) {
+          new Notification("iShot", { body: `Saved ${d.width}×${d.height}` });
+        }
+        cleanup();
+      });
+
+      T.event.listen("scroll-capture-error", () => {
+        if (cleaned) return;
+        cleanup();
+      });
+    </script>
+  </body>
+</html>

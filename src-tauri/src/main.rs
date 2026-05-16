@@ -477,6 +477,8 @@ fn main() {
             commands::scroll_capture::finalize_scroll_to_clipboard,
             commands::scroll_capture::cancel_scroll_capture,
             commands::scroll_capture::get_scroll_capture_state,
+            commands::window_enum::snapshot_windows,
+            commands::window_enum::find_window_at,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

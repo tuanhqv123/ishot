@@ -3,3 +3,4 @@ pub mod ocr;
 pub mod translate;
 pub mod scroll_capture;
 pub mod accessibility;
+pub mod window_enum;

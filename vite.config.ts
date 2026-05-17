@@ -17,6 +17,7 @@ export default defineConfig(async () => ({
 				"scroll-panel": path.resolve(__dirname, "scroll-panel.html"),
 				"scroll-border": path.resolve(__dirname, "scroll-border.html"),
 				"clipboard-history": path.resolve(__dirname, "clipboard-history.html"),
+				settings: path.resolve(__dirname, "settings.html"),
 			},
 		},
 	},

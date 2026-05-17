@@ -12,7 +12,14 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 pub const CLIPBOARD_DIR: &str = "/tmp/ishot_clipboard";
-pub const MAX_ITEMS: usize = 200;
+
+/// Read the current retention limit from the user's settings cache. Falls
+/// back to 10 (the default) when the cache is empty. Always at least 1 so
+/// `prune_to_max` never deletes the most recent entry on a misconfigured
+/// install.
+pub fn max_items() -> usize {
+    crate::services::settings::load_cached().retention.max(1)
+}
 
 static IS_PAUSED: AtomicBool = AtomicBool::new(false);
 static LAST_CHANGE_COUNT: AtomicI64 = AtomicI64::new(i64::MIN);
@@ -200,12 +207,13 @@ pub fn prune_to_max() {
         .filter_map(|e| e.ok())
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
-    if files.len() <= MAX_ITEMS {
+    let limit = max_items();
+    if files.len() <= limit {
         return;
     }
     // Lexicographic sort works because timestamps are zero-padded width.
     files.sort();
-    let drop_count = files.len() - MAX_ITEMS;
+    let drop_count = files.len() - limit;
     for name in files.into_iter().take(drop_count) {
         let p = dir.join(name);
         if let Err(e) = std::fs::remove_file(&p) {

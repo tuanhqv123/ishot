@@ -76,6 +76,49 @@ fn config_to_shortcut(config: &Config) -> Shortcut {
     Shortcut::new(Some(modifiers), str_to_code(&config.key))
 }
 
+fn spec_to_shortcut(spec: &crate::services::settings::ShortcutSpec) -> Shortcut {
+    let mut modifiers = Modifiers::empty();
+    if spec.modifiers & 1 != 0 { modifiers |= Modifiers::META; }
+    if spec.modifiers & 2 != 0 { modifiers |= Modifiers::SHIFT; }
+    if spec.modifiers & 4 != 0 { modifiers |= Modifiers::ALT; }
+    if spec.modifiers & 8 != 0 { modifiers |= Modifiers::CONTROL; }
+    Shortcut::new(Some(modifiers), str_to_code(&spec.key))
+}
+
+/// Drop all current global shortcut registrations and re-register from the
+/// cached settings. Called after `save_settings` so a keybind change takes
+/// effect without restarting the app.
+pub fn re_register_shortcuts(app: &tauri::AppHandle) {
+    let settings = crate::services::settings::load_cached();
+    let _ = app.global_shortcut().unregister_all();
+
+    let capture = spec_to_shortcut(&settings.shortcuts.capture);
+    let app_capture = app.clone();
+    if let Err(e) = app
+        .global_shortcut()
+        .on_shortcut(capture, move |_app, _sc, event| {
+            if event.state == ShortcutState::Pressed {
+                trigger_screenshot(&app_capture);
+            }
+        })
+    {
+        eprintln!("[shortcuts] capture register failed: {}", e);
+    }
+
+    let clipboard = spec_to_shortcut(&settings.shortcuts.clipboard);
+    let app_clip = app.clone();
+    if let Err(e) = app
+        .global_shortcut()
+        .on_shortcut(clipboard, move |_app, _sc, event| {
+            if event.state == ShortcutState::Pressed {
+                services::clipboard_panel::toggle(&app_clip);
+            }
+        })
+    {
+        eprintln!("[shortcuts] clipboard register failed: {}", e);
+    }
+}
+
 struct AppState {
     current_shortcut: Shortcut,
     shortcut_display: String,
@@ -289,6 +332,11 @@ fn main() {
         .setup(move |app| {
             use crate::services::screen_capture::ScreenCaptureService;
 
+            // Load persistent settings once into the in-memory cache so hot
+            // readers (clipboard pruning, panel construction) don't touch
+            // disk on every access.
+            crate::services::settings::init_cache();
+
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
@@ -335,11 +383,12 @@ fn main() {
             let separator1 = PredefinedMenuItem::separator(app)?;
             let launch_i = CheckMenuItem::with_id(app, "launch_at_login", "Launch at Login", true, is_enabled, None::<&str>)?;
             let clipboard_i = MenuItem::with_id(app, "clipboard_history", "Clipboard History  ⌘⇧V", true, None::<&str>)?;
+            let settings_i = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let check_update_i = MenuItem::with_id(app, "check_update", "Check for Updates…", true, None::<&str>)?;
             let separator2 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit iShot", true, None::<&str>)?;
 
-            let menu = Menu::with_items(app, &[&shortcut_i, &separator1, &launch_i, &clipboard_i, &check_update_i, &separator2, &quit_i])?;
+            let menu = Menu::with_items(app, &[&shortcut_i, &separator1, &launch_i, &clipboard_i, &settings_i, &check_update_i, &separator2, &quit_i])?;
 
             let shortcut_item = shortcut_i.clone();
             
@@ -372,6 +421,9 @@ fn main() {
                         "clipboard_history" => {
                             services::clipboard_panel::toggle(app);
                         }
+                        "settings" => {
+                            services::settings_panel::toggle(app);
+                        }
                         "check_update" => {
                             // Spawn the updater check so we don't block the menu
                             // event handler. Status (found / up-to-date / error)
@@ -389,23 +441,21 @@ fn main() {
                 })
                 .build(app)?;
 
-            // Register saved shortcut
-            let state_for_shortcut = state.clone();
+            // Register shortcuts from persisted settings (capture + clipboard).
+            // The recorder window UI in `set-shortcut` still owns the capture
+            // hotkey separately; this seeds both from the settings file at
+            // launch so a user who only edits via the new Settings panel gets
+            // the right bindings without going through the legacy recorder.
+            let settings_now = crate::services::settings::load_cached();
+            let capture_shortcut = spec_to_shortcut(&settings_now.shortcuts.capture);
             let app_handle_for_shortcut = app.handle().clone();
-            
-            let shortcut = {
-                let s = state_for_shortcut.lock().unwrap();
-                s.current_shortcut
-            };
-            
-            app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
+            app.global_shortcut().on_shortcut(capture_shortcut, move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
                     trigger_screenshot(&app_handle_for_shortcut);
                 }
             })?;
 
-            // Cmd+Shift+V — toggle clipboard history window.
-            let clipboard_shortcut = Shortcut::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyV);
+            let clipboard_shortcut = spec_to_shortcut(&settings_now.shortcuts.clipboard);
             let app_handle_for_clipboard = app.handle().clone();
             app.global_shortcut().on_shortcut(clipboard_shortcut, move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
@@ -413,8 +463,18 @@ fn main() {
                 }
             })?;
 
-            // Build the Spotlight-style clipboard panel (hidden until toggled).
+            // Sync the in-memory legacy `state` (used by the menu label /
+            // recorder window) with whatever the settings file says, so the
+            // tray label and the recorder agree on the current capture combo.
+            {
+                let mut s = state.lock().unwrap();
+                s.current_shortcut = capture_shortcut;
+                s.shortcut_display = shortcut_to_display(&capture_shortcut);
+            }
+
+            // Build the Spotlight-style panels (hidden until toggled).
             services::clipboard_panel::build(&app.handle());
+            services::settings_panel::build(&app.handle());
 
             // Start clipboard polling thread.
             services::clipboard_history::start_polling(app.handle().clone());
@@ -506,6 +566,11 @@ fn main() {
             commands::clipboard_history::is_clipboard_paused,
             commands::window_enum::snapshot_windows,
             commands::window_enum::find_window_at,
+            commands::settings::get_settings,
+            commands::settings::save_settings,
+            commands::settings::has_api_key,
+            commands::settings::set_api_key,
+            commands::settings::clear_api_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

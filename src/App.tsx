@@ -99,6 +99,27 @@ function App() {
 	const [isDragging, setIsDragging] = useState(false);
 	const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
+	// Window-detect mode (Cmd+Shift+4 → Space style): hover snaps the selection
+	// to whatever window is under the cursor. Active by default when the
+	// overlay first appears; the moment the user mousedown+drags more than
+	// a few pixels we flip into manual "region" mode for the rest of this
+	// session. `hoveredWindow` is the live hit-test result we draw.
+	type WindowInfo = {
+		id: number;
+		x: number;
+		y: number;
+		w: number;
+		h: number;
+		app_name: string;
+		title: string;
+		layer: number;
+		alpha: number;
+		pid: number;
+	};
+	const [selectMode, setSelectMode] = useState<"auto" | "region">("auto");
+	const [snappedWindows, setSnappedWindows] = useState<WindowInfo[]>([]);
+	const [hoveredWindow, setHoveredWindow] = useState<WindowInfo | null>(null);
+
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const [tool, setTool] = useState<Tool>(null);
 	const [isDrawing, setIsDrawing] = useState(false);
@@ -599,6 +620,13 @@ function App() {
 			setTool(null);
 			setSelectedAnnotation(null);
 			setTempBlur(null);
+			// Reset window-detect: every new capture session starts in auto mode.
+			// Snapshot the OS windows now so hover hit-testing is instant.
+			setSelectMode("auto");
+			setHoveredWindow(null);
+			invoke<WindowInfo[]>("snapshot_windows")
+				.then(setSnappedWindows)
+				.catch((e) => console.error("[window-detect] snapshot failed:", e));
 		});
 		return () => {
 			unlisten.then((fn) => fn());
@@ -954,30 +982,81 @@ function App() {
 		if (stage === "editing") redrawAnnotations();
 	}, [annotations, stage, redrawAnnotations, selectedAnnotation]);
 
+	// Mouse handlers — selection has TWO modes:
+	//   - "auto": hover-detect, snaps to whatever OS window is under cursor.
+	//             Click without drag = capture that window.
+	//   - "region": classic drag-to-select rectangle.
+	// We start in auto; the moment the user mousedown+drags more than 4 px we
+	// flip to region for the rest of this session.
+	const DRAG_THRESHOLD = 4;
+
+	const monLocal = () => {
+		const idx = getWindowMonitorIndex();
+		return monitors[idx] || { x: 0, y: 0, width: 0, height: 0, scale_factor: 1 };
+	};
+
 	const handleMouseDown = (e: React.MouseEvent) => {
 		if (stage === "selecting") {
 			e.preventDefault();
-			setIsDragging(true);
 			dragStartRef.current = { x: e.clientX, y: e.clientY };
-			setSelection(null);
+			// Don't commit isDragging or clear the hover highlight yet — we
+			// might still be in auto mode and this could be a click.
 		}
 	};
 
 	const handleMouseMove = (e: React.MouseEvent) => {
-		if (stage === "selecting" && isDragging && dragStartRef.current) {
-			e.preventDefault();
-			const start = dragStartRef.current;
+		if (stage !== "selecting") return;
+		e.preventDefault();
+		const start = dragStartRef.current;
+
+		// Region mode (or just promoted to it): track the drag rect.
+		if (isDragging && start) {
 			setSelection({
 				x: Math.min(start.x, e.clientX),
 				y: Math.min(start.y, e.clientY),
 				width: Math.abs(e.clientX - start.x),
 				height: Math.abs(e.clientY - start.y),
 			});
+			return;
+		}
+
+		// Mouse held down but not yet dragging — promote on threshold.
+		if (start) {
+			const dx = e.clientX - start.x;
+			const dy = e.clientY - start.y;
+			if (dx * dx + dy * dy > DRAG_THRESHOLD * DRAG_THRESHOLD) {
+				setSelectMode("region");
+				setHoveredWindow(null);
+				setIsDragging(true);
+				setSelection({
+					x: Math.min(start.x, e.clientX),
+					y: Math.min(start.y, e.clientY),
+					width: Math.abs(e.clientX - start.x),
+					height: Math.abs(e.clientY - start.y),
+				});
+			}
+			return;
+		}
+
+		// Auto-detect: convert cursor to screen coords and hit-test the cached
+		// window list. snapshot_windows returns front-to-back z-order so the
+		// first hit is the topmost window.
+		if (selectMode === "auto" && snappedWindows.length > 0) {
+			const mon = monLocal();
+			const sx = mon.x + e.clientX;
+			const sy = mon.y + e.clientY;
+			const hit = snappedWindows.find(
+				(w) => sx >= w.x && sx < w.x + w.w && sy >= w.y && sy < w.y + w.h,
+			);
+			setHoveredWindow(hit ?? null);
 		}
 	};
 
-	const handleMouseUp = () => {
-		if (stage === "selecting" && isDragging) {
+	const handleMouseUp = (_e: React.MouseEvent) => {
+		if (stage !== "selecting") return;
+
+		// Region mode: finalize the drag rect (existing flow).
+		if (isDragging) {
 			setIsDragging(false);
 			dragStartRef.current = null;
 			if (selection && selection.width > 10 && selection.height > 10) {
@@ -985,6 +1064,29 @@ function App() {
 				setTool(null);
 				emit("selection-locked", { label: getCurrentWindow().label });
 			} else setSelection(null);
+			return;
+		}
+
+		// Auto mode click — if cursor is over a window, capture that window.
+		// Convert screen-space window rect to local overlay coords by
+		// subtracting the monitor offset; clamp to monitor bounds so a
+		// window that spans monitors doesn't draw off-screen.
+		dragStartRef.current = null;
+		if (selectMode === "auto" && hoveredWindow) {
+			const mon = monLocal();
+			const localX = hoveredWindow.x - mon.x;
+			const localY = hoveredWindow.y - mon.y;
+			const x = Math.max(0, localX);
+			const y = Math.max(0, localY);
+			const w = Math.min(hoveredWindow.x + hoveredWindow.w - mon.x, mon.width) - x;
+			const h = Math.min(hoveredWindow.y + hoveredWindow.h - mon.y, mon.height) - y;
+			if (w > 10 && h > 10) {
+				setSelection({ x, y, width: w, height: h });
+				setHoveredWindow(null);
+				setStage("editing");
+				setTool(null);
+				emit("selection-locked", { label: getCurrentWindow().label });
+			}
 		}
 	};
 
@@ -1514,17 +1616,100 @@ function App() {
 			)}
 
 			{stage === "selecting" && !selection && (
-				<div
-					style={{
-						position: "absolute",
-						top: 0,
-						left: 0,
-						width: "100vw",
-						height: "100vh",
-						background: "rgba(0,0,0,0.3)",
-						pointerEvents: "none",
-					}}
-				/>
+				<>
+					{/* Dim everything except the window under cursor (auto mode).
+					    The dim layer uses the same clip-path trick as the region
+					    overlay below: a punched-out rect over the hovered window. */}
+					{selectMode === "auto" && hoveredWindow && (() => {
+						const mon = monLocal();
+						const x = Math.max(0, hoveredWindow.x - mon.x);
+						const y = Math.max(0, hoveredWindow.y - mon.y);
+						const w =
+							Math.min(hoveredWindow.x + hoveredWindow.w - mon.x, mon.width) - x;
+						const h =
+							Math.min(hoveredWindow.y + hoveredWindow.h - mon.y, mon.height) - y;
+						if (w <= 0 || h <= 0) return null;
+						return (
+							<>
+								<div
+									style={{
+										position: "absolute",
+										inset: 0,
+										background: "rgba(0,0,0,0.5)",
+										pointerEvents: "none",
+										clipPath: `polygon(0% 0%, 0% 100%, ${x}px 100%, ${x}px ${y}px, ${x + w}px ${y}px, ${x + w}px ${y + h}px, ${x}px ${y + h}px, ${x}px 100%, 100% 100%, 100% 0%)`,
+									}}
+								/>
+								<div
+									style={{
+										position: "absolute",
+										left: x,
+										top: y,
+										width: w,
+										height: h,
+										border: "2px solid #0a84ff",
+										boxSizing: "border-box",
+										pointerEvents: "none",
+									}}
+								/>
+								<div
+									style={{
+										position: "absolute",
+										left: x + 6,
+										top: Math.max(6, y - 28),
+										padding: "4px 8px",
+										fontSize: 12,
+										color: "white",
+										background: "rgba(10, 132, 255, 0.92)",
+										borderRadius: 4,
+										pointerEvents: "none",
+										maxWidth: w - 12,
+										overflow: "hidden",
+										textOverflow: "ellipsis",
+										whiteSpace: "nowrap",
+									}}
+								>
+									{hoveredWindow.app_name}
+									{hoveredWindow.title ? ` — ${hoveredWindow.title}` : ""}
+								</div>
+							</>
+						);
+					})()}
+
+					{/* Solid dim when nothing hovered (auto mode initial state, or
+					    region mode waiting for drag). */}
+					{!(selectMode === "auto" && hoveredWindow) && (
+						<div
+							style={{
+								position: "absolute",
+								inset: 0,
+								background: "rgba(0,0,0,0.3)",
+								pointerEvents: "none",
+							}}
+						/>
+					)}
+
+					{/* Hint pill, bottom-center. Fades after 4s the first time the
+					    user sees it; cheap educational cue without a modal. */}
+					<div
+						style={{
+							position: "absolute",
+							bottom: 24,
+							left: "50%",
+							transform: "translateX(-50%)",
+							padding: "8px 14px",
+							fontSize: 12,
+							color: "rgba(255,255,255,0.92)",
+							background: "rgba(0,0,0,0.55)",
+							backdropFilter: "blur(8px)",
+							borderRadius: 8,
+							pointerEvents: "none",
+							letterSpacing: 0.2,
+						}}
+					>
+						Click window to capture · Drag to select region · Esc to cancel
+					</div>
+				</>
 			)}
 
 			{/* Dark overlay with clip — also shown in scroll-ready state so the user sees

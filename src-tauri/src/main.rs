@@ -285,6 +285,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_nspanel::init())
         .setup(move |app| {
             use crate::services::screen_capture::ScreenCaptureService;
 
@@ -369,7 +370,7 @@ fn main() {
                             }
                         }
                         "clipboard_history" => {
-                            toggle_clipboard_history_window(app);
+                            services::clipboard_panel::toggle(app);
                         }
                         "check_update" => {
                             // Spawn the updater check so we don't block the menu
@@ -408,9 +409,12 @@ fn main() {
             let app_handle_for_clipboard = app.handle().clone();
             app.global_shortcut().on_shortcut(clipboard_shortcut, move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
-                    toggle_clipboard_history_window(&app_handle_for_clipboard);
+                    services::clipboard_panel::toggle(&app_handle_for_clipboard);
                 }
             })?;
+
+            // Build the Spotlight-style clipboard panel (hidden until toggled).
+            services::clipboard_panel::build(&app.handle());
 
             // Start clipboard polling thread.
             services::clipboard_history::start_polling(app.handle().clone());
@@ -542,18 +546,6 @@ fn request_screen_recording_permission() {
         if !has_access {
             let granted = CGRequestScreenCaptureAccess();
             println!("Permission request result: {}", granted);
-        }
-    }
-}
-
-fn toggle_clipboard_history_window(app: &tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("clipboard_history") {
-        let visible = win.is_visible().unwrap_or(false);
-        if visible {
-            let _ = win.hide();
-        } else {
-            let _ = win.show();
-            let _ = win.set_focus();
         }
     }
 }

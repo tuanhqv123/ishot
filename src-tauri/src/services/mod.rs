@@ -4,4 +4,5 @@ pub mod translate;
 pub mod scroll_capture;
 pub mod accessibility;
 pub mod clipboard_history;
+pub mod clipboard_panel;
 pub mod window_enum;

@@ -1,35 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { convertFileSrc } from "@tauri-apps/api/core";
 
 type HistoryItem = {
   path: string;
   kind: "image" | "text";
-  created_at_ms: number;
-  size_bytes: number;
-  width: number | null;
-  height: number | null;
+  // Other backend fields (created_at_ms, size_bytes, width, height) are
+  // intentionally unused — the UI shows content only, no metadata.
 };
-
-function relativeTime(ms: number): string {
-  const diff = Date.now() - ms;
-  const s = Math.floor(diff / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const kb = bytes / 1024;
-  if (kb < 1024) return `${kb.toFixed(1)} KB`;
-  return `${(kb / 1024).toFixed(1)} MB`;
-}
 
 export default function ClipboardHistory() {
   const [items, setItems] = useState<HistoryItem[]>([]);
@@ -43,14 +21,13 @@ export default function ClipboardHistory() {
     try {
       const rows = await invoke<HistoryItem[]>("list_clipboard_history");
       setItems(rows);
-      // Prefetch text for first 20 text items so previews appear instantly.
-      const toFetch = rows.filter((r) => r.kind === "text").slice(0, 20);
+      const toFetch = rows.filter((r) => r.kind === "text").slice(0, 30);
       for (const r of toFetch) {
         try {
           const txt = await invoke<string>("read_clipboard_text", { path: r.path });
           setTextCache((c) => ({ ...c, [r.path]: txt }));
         } catch {
-          // ignore individual read failures
+          /* ignore */
         }
       }
     } catch (e) {
@@ -72,6 +49,13 @@ export default function ClipboardHistory() {
     };
   }, [refresh]);
 
+  // ESC just hides the panel — the native NSPanel stays alive for instant
+  // re-show. tauri-nspanel's resign_key hook auto-hides on click outside
+  // so we only need to handle keyboard dismiss here.
+  const hide = useCallback(async () => {
+    getCurrentWindow().hide().catch(() => {});
+  }, []);
+
   const filtered = items.filter((it) => {
     if (!search.trim()) return true;
     const q = search.toLowerCase();
@@ -89,11 +73,11 @@ export default function ClipboardHistory() {
   const copyAndHide = useCallback(async (item: HistoryItem) => {
     try {
       await invoke("copy_clipboard_item", { path: item.path });
-      await getCurrentWindow().hide();
+      await hide();
     } catch (e) {
       console.error("copy failed", e);
     }
-  }, []);
+  }, [hide]);
 
   const deleteItem = useCallback(async (item: HistoryItem) => {
     try {
@@ -108,10 +92,9 @@ export default function ClipboardHistory() {
     const onKey = async (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        await getCurrentWindow().hide();
+        await hide();
         return;
       }
-      // Ignore navigation keys when typing in the search box.
       const target = e.target as HTMLElement;
       const inInput = target && target.tagName === "INPUT";
 
@@ -124,9 +107,6 @@ export default function ClipboardHistory() {
         e.preventDefault();
         setSelected((s) => Math.max(0, s - 1));
       } else if (e.key === "Enter") {
-        if (inInput) {
-          // Allow Enter in search to also copy the top result.
-        }
         e.preventDefault();
         const item = filtered[selected];
         if (item) await copyAndHide(item);
@@ -138,7 +118,7 @@ export default function ClipboardHistory() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [filtered, selected, copyAndHide, deleteItem]);
+  }, [filtered, selected, copyAndHide, deleteItem, hide]);
 
   const togglePause = async () => {
     try {
@@ -159,7 +139,6 @@ export default function ClipboardHistory() {
     }
   };
 
-  // Lazy fetch text on demand for any item currently visible but uncached.
   useEffect(() => {
     const toFetch = filtered
       .filter((it) => it.kind === "text" && textCache[it.path] === undefined)
@@ -186,45 +165,43 @@ export default function ClipboardHistory() {
   return (
     <div className="ch-root">
       <div className="ch-topbar">
-        <input
-          className="ch-search"
-          placeholder="Search clipboard…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          autoFocus
-        />
-        <button
-          className={paused ? "ch-btn active" : "ch-btn"}
-          onClick={togglePause}
-          title="Pause clipboard capture"
-        >
-          {paused ? "Paused" : "Pause"}
-        </button>
-        <button className="ch-btn" onClick={clearAll} title="Clear all history">
-          Clear
-        </button>
-      </div>
-
-      <div className="ch-list" ref={listRef}>
-        {filtered.length === 0 && (
-          <div className="ch-empty">
-            {items.length === 0 ? "No clipboard history yet." : "No matches."}
-          </div>
-        )}
-        {filtered.map((it, idx) => (
-          <Card
-            key={it.path}
-            item={it}
-            selected={idx === selected}
-            text={textCache[it.path]}
-            onCopy={() => copyAndHide(it)}
-            onDelete={() => deleteItem(it)}
-            onSelect={() => setSelected(idx)}
+          <input
+            className="ch-search"
+            placeholder="Search…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            autoFocus
           />
-        ))}
-      </div>
+          <button
+            className={paused ? "ch-icon-btn active" : "ch-icon-btn"}
+            onClick={togglePause}
+            title={paused ? "Resume capture" : "Pause capture"}
+          >
+            {paused ? "▶" : "❚❚"}
+          </button>
+          <button className="ch-icon-btn" onClick={clearAll} title="Clear all">
+            🗑
+          </button>
+        </div>
 
-      <div className="ch-footer">↑↓ navigate · ↵ copy · ⌫ delete · esc close</div>
+        <div className="ch-list" ref={listRef}>
+          {filtered.length === 0 && (
+            <div className="ch-empty">
+              {items.length === 0 ? "No clipboard history yet" : "No matches"}
+            </div>
+          )}
+          {filtered.map((it, idx) => (
+            <Card
+              key={it.path}
+              item={it}
+              selected={idx === selected}
+              text={textCache[it.path]}
+              onCopy={() => copyAndHide(it)}
+              onDelete={() => deleteItem(it)}
+              onSelect={() => setSelected(idx)}
+            />
+          ))}
+      </div>
     </div>
   );
 }
@@ -269,25 +246,11 @@ function Card({
         ×
       </button>
       {item.kind === "image" ? (
-        <>
-          <img className="ch-img" src={convertFileSrc(item.path)} alt="clipboard image" />
-          <div className="ch-card-meta">
-            <span>
-              {item.width ?? "?"}×{item.height ?? "?"} · {formatSize(item.size_bytes)}
-            </span>
-            <span>{relativeTime(item.created_at_ms)}</span>
-          </div>
-        </>
+        <img className="ch-img" src={convertFileSrc(item.path)} alt="" />
       ) : (
-        <>
-          <div className="ch-text">
-            {text === undefined ? "…" : text.length > 200 ? text.slice(0, 200) + "…" : text}
-          </div>
-          <div className="ch-card-meta">
-            <span>{text ? `${text.length} chars` : formatSize(item.size_bytes)}</span>
-            <span>{relativeTime(item.created_at_ms)}</span>
-          </div>
-        </>
+        <div className="ch-text">
+          {text === undefined ? "…" : text.length > 400 ? text.slice(0, 400) + "…" : text}
+        </div>
       )}
     </div>
   );

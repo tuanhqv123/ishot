@@ -6,3 +6,4 @@ pub mod accessibility;
 pub mod clipboard_history;
 pub mod clipboard_panel;
 pub mod window_enum;
+pub mod ai_chat;

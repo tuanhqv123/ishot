@@ -506,6 +506,7 @@ fn main() {
             commands::clipboard_history::is_clipboard_paused,
             commands::window_enum::snapshot_windows,
             commands::window_enum::find_window_at,
+            commands::ai_chat::ai_chat_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

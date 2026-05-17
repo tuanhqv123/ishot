@@ -13,11 +13,20 @@ import {
 	ScanText,
 	ImageDown,
 	ChevronDown,
+	Sparkles,
 	Square,
 	Type,
 	Undo2,
 	X,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+interface AiChatMsg {
+	role: "system" | "user" | "assistant";
+	content: string;
+	error?: boolean;
+}
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // Detect which monitor this window belongs to based on label
@@ -199,6 +208,18 @@ function App() {
 		setLockedByOther(false);
 		setScrollCapturing(false);
 		setScrollFrames(0);
+		// AI chat — tear down listeners if a stream is active.
+		if (aiAbortRef.current) {
+			aiAbortRef.current();
+			aiAbortRef.current = null;
+		}
+		setShowAi(false);
+		setAiMessages([]);
+		setAiInput("");
+		setAiSeedText("");
+		setAiSeedExpanded(false);
+		setAiStreaming(false);
+		setAiLoading(false);
 		dragStartRef.current = null;
 	}, []);
 
@@ -462,6 +483,213 @@ function App() {
 	const [translateTarget, setTranslateTarget] = useState<string>(
 		() => localStorage.getItem("ishot-translate-target") || "vi",
 	);
+
+	// AI chat — all state lives only while the dialog is open. Closing the
+	// dialog wipes everything; we never persist conversation history.
+	const [showAi, setShowAi] = useState(false);
+	const [aiLoading, setAiLoading] = useState(false);
+	const [aiSeedText, setAiSeedText] = useState("");
+	const [aiSeedExpanded, setAiSeedExpanded] = useState(false);
+	const [aiMessages, setAiMessages] = useState<AiChatMsg[]>([]);
+	const [aiInput, setAiInput] = useState("");
+	const [aiStreaming, setAiStreaming] = useState(false);
+	const aiAbortRef = useRef<(() => void) | null>(null);
+	const aiScrollRef = useRef<HTMLDivElement>(null);
+
+	const closeAi = useCallback(() => {
+		// Tear down any in-flight stream listeners before dropping state so we
+		// don't keep writing into an unmounted UI.
+		if (aiAbortRef.current) {
+			aiAbortRef.current();
+			aiAbortRef.current = null;
+		}
+		setShowAi(false);
+		setAiMessages([]);
+		setAiInput("");
+		setAiSeedText("");
+		setAiSeedExpanded(false);
+		setAiStreaming(false);
+		setAiLoading(false);
+	}, []);
+
+	const handleAi = useCallback(async () => {
+		if (displayCaptures.length === 0 || !selection || aiLoading) return;
+		setAiLoading(true);
+		setShowAi(true);
+		setAiMessages([]);
+		try {
+			const dc = findDisplay();
+			if (!dc) {
+				setAiLoading(false);
+				return;
+			}
+			const canvas = document.createElement("canvas");
+			const img = new Image();
+			img.src = `data:image/png;base64,${dc.data}`;
+			await new Promise((r) => (img.onload = r));
+			const s = dc.monitor.scale_factor;
+			canvas.width = Math.round(selection.width * s);
+			canvas.height = Math.round(selection.height * s);
+			const ctx = canvas.getContext("2d")!;
+			ctx.drawImage(
+				img,
+				selection.x * s,
+				selection.y * s,
+				canvas.width,
+				canvas.height,
+				0,
+				0,
+				canvas.width,
+				canvas.height,
+			);
+			const base64 = canvas.toDataURL("image/png").split(",")[1];
+			const binary = atob(base64);
+			const bytes = new Uint8Array(binary.length);
+			for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+			const ocrResult = await invoke<{
+				blocks: { text: string }[];
+				full_text: string;
+			}>("perform_ocr", { pngData: Array.from(bytes) });
+			const sourceText =
+				ocrResult.full_text || ocrResult.blocks.map((b) => b.text).join(" ");
+			setAiSeedText(sourceText);
+		} catch (e) {
+			console.error("[ai] OCR seed failed", e);
+			setAiSeedText("");
+		} finally {
+			setAiLoading(false);
+		}
+	}, [displayCaptures, selection, aiLoading, findDisplay]);
+
+	const sendAiPrompt = useCallback(async () => {
+		const prompt = aiInput.trim();
+		if (!prompt || aiStreaming) return;
+		setAiInput("");
+
+		// Build the full message list. The first user turn carries the OCR
+		// context inline; subsequent turns are plain follow-ups.
+		const isFirstUserTurn = !aiMessages.some((m) => m.role === "user");
+		const userContent = isFirstUserTurn
+			? `Context from the screenshot:\n\n${aiSeedText}\n\n---\n\nQ: ${prompt}`
+			: prompt;
+
+		const baseMessages: AiChatMsg[] =
+			aiMessages.length === 0
+				? [
+						{
+							role: "system",
+							content:
+								"You are a helpful assistant. The user is sharing OCR-extracted text from a screenshot. Answer their question concisely. Render code blocks and lists in Markdown when useful.",
+						},
+					]
+				: aiMessages;
+
+		const userMsg: AiChatMsg = { role: "user", content: userContent };
+		const displayUser: AiChatMsg = { role: "user", content: prompt };
+		const assistantPlaceholder: AiChatMsg = { role: "assistant", content: "" };
+
+		const sendMessages = [...baseMessages, userMsg];
+		// What we render — we show the user's typed prompt, not the verbose
+		// context-stuffed copy. The full version is what goes to the API.
+		setAiMessages([...baseMessages, displayUser, assistantPlaceholder]);
+
+		const requestId =
+			typeof crypto !== "undefined" && "randomUUID" in crypto
+				? crypto.randomUUID()
+				: `${Date.now()}-${Math.random()}`;
+
+		setAiStreaming(true);
+
+		// Listen for token / done / error events keyed by requestId. We hold
+		// the unlisten handles in a ref so closing the dialog mid-stream
+		// tears them down deterministically.
+		let unlistenToken: (() => void) | null = null;
+		let unlistenDone: (() => void) | null = null;
+		let unlistenError: (() => void) | null = null;
+		const teardown = () => {
+			unlistenToken?.();
+			unlistenDone?.();
+			unlistenError?.();
+			unlistenToken = unlistenDone = unlistenError = null;
+			aiAbortRef.current = null;
+		};
+		aiAbortRef.current = teardown;
+
+		unlistenToken = await listen<{ text: string }>(
+			`ai-token:${requestId}`,
+			(ev) => {
+				const text = ev.payload.text;
+				setAiMessages((prev) => {
+					if (prev.length === 0) return prev;
+					const next = prev.slice();
+					const last = next[next.length - 1];
+					if (last.role !== "assistant") return prev;
+					next[next.length - 1] = { ...last, content: last.content + text };
+					return next;
+				});
+			},
+		);
+		unlistenDone = await listen(`ai-done:${requestId}`, () => {
+			setAiStreaming(false);
+			teardown();
+		});
+		unlistenError = await listen<{ message: string }>(
+			`ai-error:${requestId}`,
+			(ev) => {
+				const msg = ev.payload.message || "Unknown error";
+				setAiMessages((prev) => {
+					if (prev.length === 0) return prev;
+					const next = prev.slice();
+					const last = next[next.length - 1];
+					if (last.role !== "assistant") return prev;
+					next[next.length - 1] = {
+						...last,
+						content: last.content
+							? last.content + `\n\n_Error: ${msg}_`
+							: `Error: ${msg}`,
+						error: true,
+					};
+					return next;
+				});
+				setAiStreaming(false);
+				teardown();
+			},
+		);
+
+		try {
+			// API payload — strip the local-only `error` flag so the backend
+			// only sees role + content (matches ChatMessage on the Rust side).
+			const apiMessages = sendMessages.map((m) => ({
+				role: m.role,
+				content: m.content,
+			}));
+			await invoke("ai_chat_stream", {
+				requestId,
+				messages: apiMessages,
+			});
+		} catch (e) {
+			console.error("[ai] invoke failed", e);
+			setAiMessages((prev) => {
+				if (prev.length === 0) return prev;
+				const next = prev.slice();
+				next[next.length - 1] = {
+					role: "assistant",
+					content: `Error: ${e}`,
+					error: true,
+				};
+				return next;
+			});
+			setAiStreaming(false);
+			teardown();
+		}
+	}, [aiInput, aiMessages, aiSeedText, aiStreaming]);
+
+	// Auto-scroll chat to bottom as new content arrives.
+	useEffect(() => {
+		if (aiScrollRef.current) {
+			aiScrollRef.current.scrollTop = aiScrollRef.current.scrollHeight;
+		}
+	}, [aiMessages]);
 
 	// Pure translate call (no OCR). Used by handleTranslate AND by the
 	// language-dropdown change handler in the result dialog.
@@ -2110,6 +2338,17 @@ function App() {
 												<Languages size={18} />
 											)}
 										</ToolBtn>
+										<ToolBtn
+											active={showAi}
+											onClick={handleAi}
+											title="AI Chat"
+										>
+											{aiLoading ? (
+												<span style={{ fontSize: 11 }}>...</span>
+											) : (
+												<Sparkles size={18} />
+											)}
+										</ToolBtn>
 										<div
 											style={{
 												width: 1,
@@ -2707,6 +2946,281 @@ function App() {
 								</button>
 							</div>
 						</div>
+						);
+					})()}
+
+					{/* AI Chat dialog — positioned to the RIGHT of the selection
+					    (or LEFT if no room), mirroring the Translate dialog's
+					    placement logic. Lives entirely in the overlay window;
+					    closing it discards every message. */}
+					{showAi && (() => {
+						const AI_W = Math.min(Math.max(selection.width, 360), 480);
+						const AI_GAP = 12;
+						const rightX = selection.x + selection.width + AI_GAP;
+						const leftX = selection.x - AI_W - AI_GAP;
+						const aiLeft =
+							rightX + AI_W <= window.innerWidth - 10
+								? rightX
+								: leftX >= 10
+									? leftX
+									: Math.max(10, selection.x);
+						const aiTop = Math.max(10, selection.y);
+						const aiMaxH = Math.max(240, window.innerHeight - aiTop - 20);
+						const visibleMsgs = aiMessages.filter((m) => m.role !== "system");
+						return (
+							<div
+								style={{
+									position: "absolute",
+									left: aiLeft,
+									top: aiTop,
+									width: AI_W,
+									maxHeight: aiMaxH,
+									display: "flex",
+									flexDirection: "column",
+									gap: 4,
+									zIndex: 200,
+								}}
+								onMouseDown={(e) => e.stopPropagation()}
+								onClick={(e) => e.stopPropagation()}
+							>
+								<div
+									style={{
+										background: "rgba(255,255,255,0.97)",
+										borderRadius: 8,
+										boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+										display: "flex",
+										flexDirection: "column",
+										overflow: "hidden",
+										maxHeight: aiMaxH - 4,
+									}}
+								>
+									<div
+										style={{
+											display: "flex",
+											alignItems: "center",
+											justifyContent: "space-between",
+											padding: "8px 10px",
+											borderBottom: "1px solid rgba(0,0,0,0.08)",
+											gap: 8,
+										}}
+									>
+										<div
+											style={{
+												display: "flex",
+												alignItems: "center",
+												gap: 6,
+												fontSize: 12,
+												fontWeight: 600,
+												color: "#222",
+											}}
+										>
+											<Sparkles size={14} />
+											<span>AI Chat</span>
+										</div>
+										<button
+											onClick={() => {
+												closeAi();
+												cancelCapture();
+											}}
+											title="Close"
+											style={{
+												width: 22,
+												height: 22,
+												border: "none",
+												background: "transparent",
+												color: "#666",
+												cursor: "pointer",
+												display: "flex",
+												alignItems: "center",
+												justifyContent: "center",
+												padding: 0,
+											}}
+										>
+											<X size={14} />
+										</button>
+									</div>
+
+									<div
+										style={{
+											padding: "6px 10px",
+											borderBottom: "1px solid rgba(0,0,0,0.06)",
+											fontSize: 11,
+											color: "rgba(0,0,0,0.6)",
+										}}
+									>
+										<button
+											onClick={() => setAiSeedExpanded((v) => !v)}
+											disabled={!aiSeedText}
+											style={{
+												border: "1px solid rgba(0,0,0,0.12)",
+												background: "rgba(0,0,0,0.04)",
+												color: "rgba(0,0,0,0.7)",
+												padding: "2px 8px",
+												borderRadius: 10,
+												fontSize: 11,
+												cursor: aiSeedText ? "pointer" : "default",
+												fontFamily: "inherit",
+											}}
+										>
+											{aiLoading
+												? "Extracting text…"
+												: `OCR text (${aiSeedText.length} chars)`}
+										</button>
+										{aiSeedExpanded && aiSeedText && (
+											<div
+												style={{
+													marginTop: 6,
+													maxHeight: 100,
+													overflowY: "auto",
+													padding: 8,
+													background: "rgba(0,0,0,0.04)",
+													borderRadius: 6,
+													fontSize: 11,
+													whiteSpace: "pre-wrap",
+													wordBreak: "break-word",
+													color: "#333",
+													userSelect: "text",
+												}}
+											>
+												{aiSeedText}
+											</div>
+										)}
+									</div>
+
+									<div
+										ref={aiScrollRef}
+										style={{
+											flex: 1,
+											minHeight: 80,
+											maxHeight: aiMaxH - 220,
+											overflowY: "auto",
+											padding: "10px 10px",
+											display: "flex",
+											flexDirection: "column",
+											gap: 8,
+										}}
+									>
+										{visibleMsgs.length === 0 && (
+											<div
+												style={{
+													fontSize: 12,
+													color: "rgba(0,0,0,0.45)",
+													textAlign: "center",
+													padding: "16px 8px",
+												}}
+											>
+												Ask anything about the captured text.
+											</div>
+										)}
+										{visibleMsgs.map((m, i) => (
+											<div
+												key={i}
+												style={{
+													alignSelf:
+														m.role === "user" ? "flex-end" : "flex-start",
+													maxWidth: "88%",
+													background:
+														m.role === "user"
+															? "#007aff"
+															: m.error
+																? "rgba(255,59,48,0.08)"
+																: "rgba(0,0,0,0.05)",
+													color:
+														m.role === "user"
+															? "#fff"
+															: m.error
+																? "#c0271c"
+																: "#1a1a1a",
+													padding: "6px 10px",
+													borderRadius: 10,
+													fontSize: 13,
+													lineHeight: 1.5,
+													wordBreak: "break-word",
+													userSelect: "text",
+												}}
+												className={
+													m.role === "assistant" ? "ai-md" : undefined
+												}
+											>
+												{m.role === "assistant" ? (
+													m.content ? (
+														<ReactMarkdown remarkPlugins={[remarkGfm]}>
+															{m.content}
+														</ReactMarkdown>
+													) : (
+														<span style={{ opacity: 0.5 }}>…</span>
+													)
+												) : (
+													m.content
+												)}
+											</div>
+										))}
+									</div>
+
+									<div
+										style={{
+											borderTop: "1px solid rgba(0,0,0,0.08)",
+											padding: 8,
+											display: "flex",
+											alignItems: "flex-end",
+											gap: 6,
+										}}
+									>
+										<textarea
+											value={aiInput}
+											onChange={(e) => setAiInput(e.target.value)}
+											onKeyDown={(e) => {
+												if (e.key === "Enter" && !e.shiftKey) {
+													e.preventDefault();
+													sendAiPrompt();
+												}
+											}}
+											rows={1}
+											placeholder="Ask about this…"
+											disabled={aiLoading || aiStreaming}
+											style={{
+												flex: 1,
+												resize: "none",
+												border: "1px solid rgba(0,0,0,0.15)",
+												borderRadius: 6,
+												padding: "6px 8px",
+												fontSize: 13,
+												fontFamily: "inherit",
+												lineHeight: 1.4,
+												maxHeight: 110,
+												outline: "none",
+												background: "#fff",
+												color: "#1a1a1a",
+											}}
+										/>
+										<button
+											onClick={sendAiPrompt}
+											disabled={
+												aiStreaming || aiLoading || !aiInput.trim()
+											}
+											style={{
+												height: 30,
+												padding: "0 12px",
+												border: "none",
+												borderRadius: 6,
+												background:
+													aiStreaming || aiLoading || !aiInput.trim()
+														? "rgba(0,0,0,0.15)"
+														: "#007aff",
+												color: "#fff",
+												fontSize: 12,
+												fontFamily: "inherit",
+												cursor:
+													aiStreaming || aiLoading || !aiInput.trim()
+														? "default"
+														: "pointer",
+											}}
+										>
+											{aiStreaming ? "…" : "Send"}
+										</button>
+									</div>
+								</div>
+							</div>
 						);
 					})()}
 

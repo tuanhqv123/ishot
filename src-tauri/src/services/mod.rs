@@ -9,3 +9,4 @@ pub mod window_enum;
 pub mod settings;
 pub mod keychain;
 pub mod settings_panel;
+pub mod ai_chat;

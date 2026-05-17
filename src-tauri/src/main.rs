@@ -571,6 +571,7 @@ fn main() {
             commands::settings::has_api_key,
             commands::settings::set_api_key,
             commands::settings::clear_api_key,
+            commands::ai_chat::ai_chat_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

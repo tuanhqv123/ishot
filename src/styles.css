@@ -14,3 +14,51 @@ html, body, #root {
 body {
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
 }
+
+/* AI chat assistant message markdown */
+.ai-md > *:first-child { margin-top: 0; }
+.ai-md > *:last-child { margin-bottom: 0; }
+.ai-md p { margin: 4px 0; }
+.ai-md ul, .ai-md ol { margin: 4px 0 4px 18px; padding: 0; }
+.ai-md li { margin: 2px 0; }
+.ai-md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(0,0,0,0.07);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+.ai-md pre {
+  background: rgba(0,0,0,0.07);
+  padding: 8px 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+.ai-md pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.ai-md blockquote {
+  margin: 6px 0;
+  padding: 2px 10px;
+  border-left: 3px solid rgba(0,0,0,0.15);
+  color: rgba(0,0,0,0.7);
+}
+.ai-md a { color: #007aff; text-decoration: underline; }
+.ai-md table {
+  border-collapse: collapse;
+  margin: 6px 0;
+  font-size: 12px;
+}
+.ai-md th, .ai-md td {
+  border: 1px solid rgba(0,0,0,0.15);
+  padding: 4px 8px;
+}
+.ai-md hr {
+  border: none;
+  border-top: 1px solid rgba(0,0,0,0.12);
+  margin: 8px 0;
+}

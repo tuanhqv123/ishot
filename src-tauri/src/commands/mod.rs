@@ -7,3 +7,4 @@ pub mod scroll_capture;
 pub mod clipboard_history;
 pub mod window_enum;
 pub mod settings;
+pub mod ai_chat;

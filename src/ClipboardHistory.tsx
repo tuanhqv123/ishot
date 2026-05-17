@@ -14,7 +14,6 @@ export default function ClipboardHistory() {
   const [textCache, setTextCache] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState(0);
   const [search, setSearch] = useState("");
-  const [paused, setPaused] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
 
   const refresh = useCallback(async () => {
@@ -37,7 +36,6 @@ export default function ClipboardHistory() {
 
   useEffect(() => {
     refresh();
-    invoke<boolean>("is_clipboard_paused").then(setPaused).catch(() => {});
     const win = getCurrentWindow();
     const unlistenPromise = win.onFocusChanged(({ payload: focused }) => {
       if (focused) refresh();
@@ -120,25 +118,6 @@ export default function ClipboardHistory() {
     return () => window.removeEventListener("keydown", onKey);
   }, [filtered, selected, copyAndHide, deleteItem, hide]);
 
-  const togglePause = async () => {
-    try {
-      const next = await invoke<boolean>("toggle_clipboard_pause");
-      setPaused(next);
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const clearAll = async () => {
-    if (!window.confirm("Clear all clipboard history?")) return;
-    try {
-      await invoke("clear_clipboard_history");
-      await refresh();
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
   useEffect(() => {
     const toFetch = filtered
       .filter((it) => it.kind === "text" && textCache[it.path] === undefined)
@@ -165,24 +144,14 @@ export default function ClipboardHistory() {
   return (
     <div className="ch-root">
       <div className="ch-topbar">
-          <input
-            className="ch-search"
-            placeholder="Search…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            autoFocus
-          />
-          <button
-            className={paused ? "ch-icon-btn active" : "ch-icon-btn"}
-            onClick={togglePause}
-            title={paused ? "Resume capture" : "Pause capture"}
-          >
-            {paused ? "▶" : "❚❚"}
-          </button>
-          <button className="ch-icon-btn" onClick={clearAll} title="Clear all">
-            🗑
-          </button>
-        </div>
+        <input
+          className="ch-search"
+          placeholder="Search…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          autoFocus
+        />
+      </div>
 
         <div className="ch-list" ref={listRef}>
           {filtered.length === 0 && (
@@ -221,16 +190,8 @@ function Card({
   onDelete: () => void;
   onSelect: () => void;
 }) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (selected && ref.current) {
-      ref.current.scrollIntoView({ block: "nearest" });
-    }
-  }, [selected]);
-
   return (
     <div
-      ref={ref}
       className={selected ? "ch-card selected" : "ch-card"}
       onClick={onCopy}
       onMouseEnter={onSelect}

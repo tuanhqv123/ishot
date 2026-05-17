@@ -27,7 +27,7 @@ interface AiChatMsg {
 	content: string;
 	error?: boolean;
 }
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 // Detect which monitor this window belongs to based on label
 function getWindowMonitorIndex(): number {
@@ -128,6 +128,9 @@ function App() {
 	const [selectMode, setSelectMode] = useState<"auto" | "region">("auto");
 	const [snappedWindows, setSnappedWindows] = useState<WindowInfo[]>([]);
 	const [hoveredWindow, setHoveredWindow] = useState<WindowInfo | null>(null);
+	// Hint pill fades out after 3 s — present only at the start of each
+	// selecting session as a hint, not a permanent UI element.
+	const [hintVisible, setHintVisible] = useState(false);
 
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const [tool, setTool] = useState<Tool>(null);
@@ -155,6 +158,14 @@ function App() {
 	const [lockedByOther, setLockedByOther] = useState(false);
 	const [scrollCapturing, setScrollCapturing] = useState(false);
 	const [scrollFrames, setScrollFrames] = useState(0);
+	// Measured toolbar widths — used to clamp the toolbar inside the viewport
+	// when the selection sits near a screen edge. Starts with a sensible
+	// estimate so the first paint isn't wildly off; useLayoutEffect updates
+	// to the real width as soon as the row mounts / changes contents.
+	const toolbarRow1Ref = useRef<HTMLDivElement | null>(null);
+	const toolbarRow2Ref = useRef<HTMLDivElement | null>(null);
+	const [toolbarRow1W, setToolbarRow1W] = useState(440);
+	const [toolbarRow2W, setToolbarRow2W] = useState(440);
 	// Auto-scroll speed in pixels-per-second. Presets: Slow=300, Medium=600, Fast=1200.
 	// Higher = faster total capture but more risk of mid-animation captures.
 	const [scrollSpeedPps, setScrollSpeedPps] = useState<number>(
@@ -217,7 +228,6 @@ function App() {
 		setAiMessages([]);
 		setAiInput("");
 		setAiSeedText("");
-		setAiSeedExpanded(false);
 		setAiStreaming(false);
 		setAiLoading(false);
 		dragStartRef.current = null;
@@ -225,6 +235,10 @@ function App() {
 
 	const cancelCapture = useCallback(async () => {
 		resetState();
+		// Pop the crosshair cursor we pushed when the overlay appeared
+		// (Rust side `push_overlay_cursor`). Safe to call when nothing is
+		// pushed — it no-ops.
+		invoke("release_overlay_cursor").catch(() => {});
 		// Notify all overlay windows to reset state, then hide
 		try {
 			await emit("cancel-capture");
@@ -489,28 +503,12 @@ function App() {
 	const [showAi, setShowAi] = useState(false);
 	const [aiLoading, setAiLoading] = useState(false);
 	const [aiSeedText, setAiSeedText] = useState("");
-	const [aiSeedExpanded, setAiSeedExpanded] = useState(false);
 	const [aiMessages, setAiMessages] = useState<AiChatMsg[]>([]);
 	const [aiInput, setAiInput] = useState("");
 	const [aiStreaming, setAiStreaming] = useState(false);
 	const aiAbortRef = useRef<(() => void) | null>(null);
 	const aiScrollRef = useRef<HTMLDivElement>(null);
 
-	const closeAi = useCallback(() => {
-		// Tear down any in-flight stream listeners before dropping state so we
-		// don't keep writing into an unmounted UI.
-		if (aiAbortRef.current) {
-			aiAbortRef.current();
-			aiAbortRef.current = null;
-		}
-		setShowAi(false);
-		setAiMessages([]);
-		setAiInput("");
-		setAiSeedText("");
-		setAiSeedExpanded(false);
-		setAiStreaming(false);
-		setAiLoading(false);
-	}, []);
 
 	const handleAi = useCallback(async () => {
 		if (displayCaptures.length === 0 || !selection || aiLoading) return;
@@ -691,6 +689,20 @@ function App() {
 		}
 	}, [aiMessages]);
 
+	// Measure toolbar rows whenever the toolbar might change shape (tool
+	// selection, scroll state, blur selection). Runs synchronously before paint
+	// so the clamp uses fresh measurements and the toolbar never visibly jumps.
+	useLayoutEffect(() => {
+		if (toolbarRow1Ref.current) {
+			const w = toolbarRow1Ref.current.offsetWidth;
+			if (w > 0 && Math.abs(w - toolbarRow1W) > 1) setToolbarRow1W(w);
+		}
+		if (toolbarRow2Ref.current) {
+			const w = toolbarRow2Ref.current.offsetWidth;
+			if (w > 0 && Math.abs(w - toolbarRow2W) > 1) setToolbarRow2W(w);
+		}
+	});
+
 	// Pure translate call (no OCR). Used by handleTranslate AND by the
 	// language-dropdown change handler in the result dialog.
 	const runTranslation = useCallback(
@@ -852,6 +864,8 @@ function App() {
 			// Snapshot the OS windows now so hover hit-testing is instant.
 			setSelectMode("auto");
 			setHoveredWindow(null);
+			setHintVisible(true);
+			window.setTimeout(() => setHintVisible(false), 3000);
 			invoke<WindowInfo[]>("snapshot_windows")
 				.then(setSnappedWindows)
 				.catch((e) => console.error("[window-detect] snapshot failed:", e));
@@ -1232,6 +1246,28 @@ function App() {
 		}
 	};
 
+	// Commit the hovered window as the final selection — converts the
+	// screen-space rect back to overlay-local coords, clamps to monitor
+	// bounds, and advances to the editing stage so the toolbar appears.
+	const commitHoveredWindow = useCallback((w: WindowInfo) => {
+		const idx = getWindowMonitorIndex();
+		const mon = monitors[idx];
+		if (!mon) return;
+		const x = Math.max(0, w.x - mon.x);
+		const y = Math.max(0, w.y - mon.y);
+		const ww = Math.min(w.x + w.w - mon.x, mon.width) - x;
+		const hh = Math.min(w.y + w.h - mon.y, mon.height) - y;
+		if (ww <= 10 || hh <= 10) return;
+		setSelection({ x, y, width: ww, height: hh });
+		setHoveredWindow(null);
+		setStage("editing");
+		setTool(null);
+		// Keep iShot active here — the editing toolbar needs to be clickable
+		// without a stale "click-to-focus-app-first" round trip. Deactivation
+		// happens later in cancelCapture (the only path that hides the overlay).
+		emit("selection-locked", { label: getCurrentWindow().label });
+	}, [monitors]);
+
 	const handleMouseMove = (e: React.MouseEvent) => {
 		if (stage !== "selecting") return;
 		e.preventDefault();
@@ -1267,16 +1303,16 @@ function App() {
 		}
 
 		// Auto-detect: convert cursor to screen coords and hit-test the cached
-		// window list. snapshot_windows returns front-to-back z-order so the
-		// first hit is the topmost window.
+		// window list. Hover only previews — the user has to click (or
+		// click-drag) to commit, matching native macOS Cmd+Shift+4+Space.
 		if (selectMode === "auto" && snappedWindows.length > 0) {
 			const mon = monLocal();
 			const sx = mon.x + e.clientX;
 			const sy = mon.y + e.clientY;
 			const hit = snappedWindows.find(
 				(w) => sx >= w.x && sx < w.x + w.w && sy >= w.y && sy < w.y + w.h,
-			);
-			setHoveredWindow(hit ?? null);
+			) ?? null;
+			setHoveredWindow(hit);
 		}
 	};
 
@@ -1290,30 +1326,22 @@ function App() {
 			if (selection && selection.width > 10 && selection.height > 10) {
 				setStage("editing");
 				setTool(null);
+				// Same as auto-commit above: stay active so the toolbar
+				// responds to the first click.
 				emit("selection-locked", { label: getCurrentWindow().label });
 			} else setSelection(null);
 			return;
 		}
 
-		// Auto mode click — if cursor is over a window, capture that window.
-		// Convert screen-space window rect to local overlay coords by
-		// subtracting the monitor offset; clamp to monitor bounds so a
-		// window that spans monitors doesn't draw off-screen.
+		// Auto mode, click without drag:
+		//   - over a window → commit that window as the selection
+		//   - over empty space → cancel the overlay (Esc-equivalent)
 		dragStartRef.current = null;
-		if (selectMode === "auto" && hoveredWindow) {
-			const mon = monLocal();
-			const localX = hoveredWindow.x - mon.x;
-			const localY = hoveredWindow.y - mon.y;
-			const x = Math.max(0, localX);
-			const y = Math.max(0, localY);
-			const w = Math.min(hoveredWindow.x + hoveredWindow.w - mon.x, mon.width) - x;
-			const h = Math.min(hoveredWindow.y + hoveredWindow.h - mon.y, mon.height) - y;
-			if (w > 10 && h > 10) {
-				setSelection({ x, y, width: w, height: h });
-				setHoveredWindow(null);
-				setStage("editing");
-				setTool(null);
-				emit("selection-locked", { label: getCurrentWindow().label });
+		if (selectMode === "auto") {
+			if (hoveredWindow) {
+				commitHoveredWindow(hoveredWindow);
+			} else {
+				cancelCapture();
 			}
 		}
 	};
@@ -1875,31 +1903,12 @@ function App() {
 										top: y,
 										width: w,
 										height: h,
-										border: "2px solid #0a84ff",
+										border: "2px solid #ffffff",
+										boxShadow: "0 0 0 1px rgba(0,0,0,0.45), 0 4px 16px rgba(0,0,0,0.35)",
 										boxSizing: "border-box",
 										pointerEvents: "none",
 									}}
 								/>
-								<div
-									style={{
-										position: "absolute",
-										left: x + 6,
-										top: Math.max(6, y - 28),
-										padding: "4px 8px",
-										fontSize: 12,
-										color: "white",
-										background: "rgba(10, 132, 255, 0.92)",
-										borderRadius: 4,
-										pointerEvents: "none",
-										maxWidth: w - 12,
-										overflow: "hidden",
-										textOverflow: "ellipsis",
-										whiteSpace: "nowrap",
-									}}
-								>
-									{hoveredWindow.app_name}
-									{hoveredWindow.title ? ` — ${hoveredWindow.title}` : ""}
-								</div>
 							</>
 						);
 					})()}
@@ -1917,8 +1926,9 @@ function App() {
 						/>
 					)}
 
-					{/* Hint pill, bottom-center. Fades after 4s the first time the
-					    user sees it; cheap educational cue without a modal. */}
+					{/* Hint pill, bottom-center. Visible for 3 s on every new
+					    selecting session, then fades out — educational without
+					    cluttering the screen permanently. */}
 					<div
 						style={{
 							position: "absolute",
@@ -1933,6 +1943,8 @@ function App() {
 							borderRadius: 8,
 							pointerEvents: "none",
 							letterSpacing: 0.2,
+							opacity: hintVisible ? 1 : 0,
+							transition: "opacity 400ms ease",
 						}}
 					>
 						Click window to capture · Drag to select region · Esc to cancel
@@ -2225,11 +2237,20 @@ function App() {
 								: selection.y + selection.height + 8;
 							const row1Top = Math.max(4, baseTop);
 							const row2Top = row1Top + row1H + gap;
+							// Clamp using the WIDER of the two rows so neither one clips
+							// off-screen even when row 2 is wider than row 1 (e.g. scroll
+							// settings + Cancel/Start fills row 2 more than the tools fill
+							// row 1). Measurements come from a useLayoutEffect on the row
+							// refs — accurate even after the toolbar's contents change.
+							const widestRow = hasRow2
+								? Math.max(toolbarRow1W, toolbarRow2W)
+								: toolbarRow1W;
+							const halfW = widestRow / 2;
 							const toolbarLeft = Math.max(
 								4,
 								Math.min(
-									selection.x + selection.width / 2 - 210,
-									window.innerWidth - 460,
+									selection.x + selection.width / 2 - halfW,
+									window.innerWidth - widestRow - 4,
 								),
 							);
 							const isDrawTool =
@@ -2260,7 +2281,7 @@ function App() {
 							return (
 								<>
 									{/* Row 1: Tools + actions */}
-									<div style={{ ...barStyle, top: row1Top }}>
+									<div ref={toolbarRow1Ref} style={{ ...barStyle, top: row1Top }}>
 										<ToolBtn
 											active={tool === "rect"}
 											onClick={() => handleToolChange("rect")}
@@ -2384,6 +2405,7 @@ function App() {
 									    one white card like the translate dialog's content panel. */}
 									{hasRow2 && (
 										<div
+											ref={toolbarRow2Ref}
 											style={{
 												...barStyle,
 												top: row2Top,
@@ -2994,99 +3016,6 @@ function App() {
 										maxHeight: aiMaxH - 4,
 									}}
 								>
-									<div
-										style={{
-											display: "flex",
-											alignItems: "center",
-											justifyContent: "space-between",
-											padding: "8px 10px",
-											borderBottom: "1px solid rgba(0,0,0,0.08)",
-											gap: 8,
-										}}
-									>
-										<div
-											style={{
-												display: "flex",
-												alignItems: "center",
-												gap: 6,
-												fontSize: 12,
-												fontWeight: 600,
-												color: "#222",
-											}}
-										>
-											<Sparkles size={14} />
-											<span>AI Chat</span>
-										</div>
-										<button
-											onClick={() => {
-												closeAi();
-												cancelCapture();
-											}}
-											title="Close"
-											style={{
-												width: 22,
-												height: 22,
-												border: "none",
-												background: "transparent",
-												color: "#666",
-												cursor: "pointer",
-												display: "flex",
-												alignItems: "center",
-												justifyContent: "center",
-												padding: 0,
-											}}
-										>
-											<X size={14} />
-										</button>
-									</div>
-
-									<div
-										style={{
-											padding: "6px 10px",
-											borderBottom: "1px solid rgba(0,0,0,0.06)",
-											fontSize: 11,
-											color: "rgba(0,0,0,0.6)",
-										}}
-									>
-										<button
-											onClick={() => setAiSeedExpanded((v) => !v)}
-											disabled={!aiSeedText}
-											style={{
-												border: "1px solid rgba(0,0,0,0.12)",
-												background: "rgba(0,0,0,0.04)",
-												color: "rgba(0,0,0,0.7)",
-												padding: "2px 8px",
-												borderRadius: 10,
-												fontSize: 11,
-												cursor: aiSeedText ? "pointer" : "default",
-												fontFamily: "inherit",
-											}}
-										>
-											{aiLoading
-												? "Extracting text…"
-												: `OCR text (${aiSeedText.length} chars)`}
-										</button>
-										{aiSeedExpanded && aiSeedText && (
-											<div
-												style={{
-													marginTop: 6,
-													maxHeight: 100,
-													overflowY: "auto",
-													padding: 8,
-													background: "rgba(0,0,0,0.04)",
-													borderRadius: 6,
-													fontSize: 11,
-													whiteSpace: "pre-wrap",
-													wordBreak: "break-word",
-													color: "#333",
-													userSelect: "text",
-												}}
-											>
-												{aiSeedText}
-											</div>
-										)}
-									</div>
-
 									<div
 										ref={aiScrollRef}
 										style={{

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -102,6 +102,28 @@ export default function Settings() {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [savingKey, setSavingKey] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  // Available model ids fetched from {base_url}/models. Populates the
+  // datalist hint dropdown next to the model input; the input itself stays
+  // free-form so users can also type a model id manually (handy for unlisted
+  // proxy endpoints).
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  // Anchor for the model dropdown — used to pin the floating list directly
+  // under the input with `position: fixed`, avoiding parent overflow clipping.
+  const modelInputRef = useRef<HTMLInputElement | null>(null);
+  const [modelDropdownPos, setModelDropdownPos] = useState<{
+    top: number;
+    left: number;
+    width: number;
+  } | null>(null);
+
+  const computeDropdownPos = useCallback(() => {
+    const el = modelInputRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setModelDropdownPos({ top: r.bottom + 4, left: r.left, width: r.width });
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -184,6 +206,31 @@ export default function Settings() {
     }
   };
 
+  const onFetchModels = async () => {
+    if (!settings) return;
+    setFetchingModels(true);
+    setStatus(null);
+    try {
+      // Pass the in-flight base_url + api_key (if just typed) explicitly so the
+      // user can probe a provider BEFORE pressing Save. Backend falls back to
+      // the keychain-stored key when apiKeyInput is empty.
+      const ids = await invoke<string[]>("list_ai_models", {
+        baseUrl: settings.ai.base_url,
+        apiKey: apiKeyInput,
+      });
+      setAvailableModels(ids);
+      computeDropdownPos();
+      setModelDropdownOpen(ids.length > 0);
+      setStatus(`Found ${ids.length} model${ids.length === 1 ? "" : "s"}.`);
+      setTimeout(() => setStatus(null), 2000);
+    } catch (e) {
+      console.error("list_ai_models failed", e);
+      setStatus(`Fetch failed: ${e}`);
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
   return (
     <div className="st-root">
       <div className="st-header">
@@ -244,12 +291,75 @@ export default function Settings() {
           </div>
           <div className="st-row">
             <div className="st-label">Model</div>
-            <input
-              className="st-input"
-              type="text"
-              value={settings.ai.model}
-              onChange={(e) => updateAi({ model: e.target.value })}
-            />
+            <div className="st-model-wrap">
+              <div className="st-key-row">
+                <input
+                  ref={modelInputRef}
+                  className="st-input"
+                  type="text"
+                  value={settings.ai.model}
+                  onFocus={() => {
+                    if (availableModels.length > 0) {
+                      computeDropdownPos();
+                      setModelDropdownOpen(true);
+                    }
+                  }}
+                  onChange={(e) => updateAi({ model: e.target.value })}
+                  placeholder="gpt-4o-mini"
+                />
+                <button
+                  className="st-btn"
+                  onClick={onFetchModels}
+                  disabled={fetchingModels || !settings.ai.base_url.trim()}
+                  title="Fetch models from {base_url}/models"
+                  type="button"
+                >
+                  {fetchingModels ? "…" : "Fetch"}
+                </button>
+              </div>
+              {modelDropdownOpen && availableModels.length > 0 && (
+                <>
+                  {/* Click-outside scrim — covers everything else in the panel
+                      so any non-dropdown click closes the menu. */}
+                  <div
+                    className="st-dropdown-scrim"
+                    onClick={() => setModelDropdownOpen(false)}
+                  />
+                  <ul
+                    className="st-dropdown"
+                    role="listbox"
+                    style={
+                      modelDropdownPos
+                        ? {
+                            top: modelDropdownPos.top,
+                            left: modelDropdownPos.left,
+                            width: modelDropdownPos.width,
+                          }
+                        : undefined
+                    }
+                  >
+                    {availableModels.map((m) => (
+                      <li
+                        key={m}
+                        className={
+                          m === settings.ai.model
+                            ? "st-dropdown-item selected"
+                            : "st-dropdown-item"
+                        }
+                        onClick={() => {
+                          updateAi({ model: m });
+                          setModelDropdownOpen(false);
+                        }}
+                        role="option"
+                        aria-selected={m === settings.ai.model}
+                      >
+                        {m}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
           </div>
           <div className="st-row">
             <div className="st-label">API key</div>

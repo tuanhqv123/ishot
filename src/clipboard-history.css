@@ -105,25 +105,25 @@ html, body, #root {
 
 .ch-delete {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 6px;
+  right: 6px;
   width: 22px;
   height: 22px;
-  border-radius: 50%;
   border: none;
-  background: rgba(0, 0, 0, 0.4);
-  color: rgba(255, 255, 255, 0.92);
+  border-radius: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
   cursor: pointer;
-  font-size: 14px;
-  line-height: 20px;
+  font-size: 16px;
+  line-height: 22px;
   padding: 0;
   opacity: 0;
-  transition: opacity 100ms;
+  transition: opacity 100ms, color 100ms;
   z-index: 1;
 }
 .ch-card:hover .ch-delete,
 .ch-card.selected .ch-delete { opacity: 1; }
-.ch-delete:hover { background: rgba(255, 59, 48, 0.85); }
+.ch-delete:hover { color: rgba(255, 255, 255, 1); }
 
 .ch-img {
   max-width: 100%;

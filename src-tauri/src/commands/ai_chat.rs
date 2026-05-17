@@ -1,14 +1,68 @@
 use crate::services::ai_chat::{stream_chat, ChatMessage};
+use crate::services::{keychain, settings};
 use tauri::{AppHandle, Emitter};
 
-// TODO: replace env-var fallback once services::settings + services::keychain
-// land. The main settings work will wire those in; for now we read from env so
-// the chat feature is testable in isolation.
+/// Hit `{base_url}/models` (OpenAI-compatible spec) and return the model ids.
+/// Lets the Settings panel populate a dropdown instead of forcing the user to
+/// type the model name. Callers pass an explicit `base_url` + `api_key` rather
+/// than reading from settings so they can test arbitrary providers BEFORE
+/// saving them.
+#[tauri::command]
+pub async fn list_ai_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
+    let trimmed = base_url.trim_end_matches('/');
+    let url = format!("{}/models", trimmed);
+    let key = if api_key.is_empty() {
+        keychain::get_api_key().unwrap_or_default()
+    } else {
+        api_key
+    };
+
+    let client = reqwest::Client::new();
+    let mut req = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .header("User-Agent", "iShot/0.1");
+    if !key.is_empty() {
+        req = req.bearer_auth(key);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("network error: {}", e))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("HTTP {}: {}", status, body.trim()));
+    }
+
+    // OpenAI shape: { "data": [ { "id": "..." }, ... ] }
+    // Some providers (Ollama) use a flat array; handle both.
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse error: {}", e))?;
+    let arr = json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .or_else(|| json.as_array())
+        .ok_or_else(|| "unexpected response shape".to_string())?;
+    let mut ids: Vec<String> = arr
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    ids.sort();
+    Ok(ids)
+}
+
+/// Read AI configuration from the persisted Settings file (`services::settings`)
+/// and the API key from the macOS Keychain (`services::keychain`). User edits
+/// these via the Settings panel.
 fn load_ai_config() -> (String, String, String) {
-    let base_url = std::env::var("OPENAI_BASE_URL")
-        .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-    let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+    let s = settings::load_cached();
+    let base_url = s.ai.base_url.clone();
+    let model = s.ai.model.clone();
+    let api_key = keychain::get_api_key().unwrap_or_default();
     (base_url, api_key, model)
 }
 
@@ -20,7 +74,7 @@ pub async fn ai_chat_stream(
 ) -> Result<(), String> {
     let (base_url, api_key, model) = load_ai_config();
     if api_key.is_empty() {
-        let msg = "AI API key not configured. Set OPENAI_API_KEY or configure in Settings.";
+        let msg = "AI API key not configured. Open Settings to add one.";
         let _ = app.emit(&format!("ai-error:{}", request_id), serde_json::json!({ "message": msg }));
         return Err(msg.to_string());
     }

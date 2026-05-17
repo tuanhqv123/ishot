@@ -147,6 +147,34 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
         let _ = overlay.show();
         // NOTE: intentionally no set_focus() — see CLAUDE.md. The overlay must appear on top
         // of any active app without stealing keyboard focus from it.
+        // Enable mouseMove events without button-down — required for the
+        // hover-window-detect path. NSWindow defaults to firing mouseMove
+        // only after a click, which is why the user previously had to
+        // click once before hover started working.
+        #[cfg(target_os = "macos")]
+        #[allow(deprecated)]
+        if let Ok(ns_ptr) = overlay.ns_window() {
+            let ns_win = ns_ptr as id;
+            unsafe { ns_win.setAcceptsMouseMovedEvents_(objc::runtime::YES); }
+        }
+
+        // Activate the application so the webview's CSS `cursor: crosshair`
+        // takes effect immediately. Without activating, iShot is a background
+        // menu-bar app (LSUIElement=true) and macOS routes cursor control to
+        // whichever app *is* active — so our crosshair cursor never appears.
+        //
+        // This is just app-level activate, NOT `set_focus()` on the overlay.
+        // The foreground app keeps its window in front of ours visually as
+        // far as the user's workflow is concerned; we're only briefly
+        // becoming the cursor-owning app for the selecting phase. JS calls
+        // `release_overlay_cursor` (now deactivates) on commit/cancel so the
+        // previous app reclaims activity.
+        let _ = app.run_on_main_thread(|| {
+            unsafe {
+                let ns_app: id = objc::msg_send![objc::class!(NSApplication), sharedApplication];
+                let _: () = objc::msg_send![ns_app, activateIgnoringOtherApps: objc::runtime::YES];
+            }
+        });
     }
 
     // Create or reuse overlay windows for secondary monitors
@@ -190,6 +218,7 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
                             NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
                             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
                         );
+                        ns_win.setAcceptsMouseMovedEvents_(objc::runtime::YES);
                     }
                 }
                 let _ = win.show();
@@ -534,6 +563,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            release_overlay_cursor,
             commands::screenshot::capture_screen,
             commands::screenshot::capture_region,
             commands::screenshot::get_display_bounds,
@@ -572,6 +602,7 @@ fn main() {
             commands::settings::set_api_key,
             commands::settings::clear_api_key,
             commands::ai_chat::ai_chat_stream,
+            commands::ai_chat::list_ai_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -614,6 +645,24 @@ fn request_screen_recording_permission() {
             println!("Permission request result: {}", granted);
         }
     }
+}
+
+/// Deactivate iShot when the selecting stage ends so the previously-foreground
+/// app reclaims its active status and its windows resume cursor control. Called
+/// from JS on commit / cancel. Dispatches to the main thread.
+#[tauri::command]
+fn release_overlay_cursor(app: tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.run_on_main_thread(|| {
+            unsafe {
+                let ns_app: id = objc::msg_send![objc::class!(NSApplication), sharedApplication];
+                let _: () = objc::msg_send![ns_app, deactivate];
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
 }
 
 fn open_shortcut_recorder(app: &tauri::AppHandle) {

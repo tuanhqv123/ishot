@@ -42,6 +42,7 @@ html, body, #root {
 .st-body {
   flex: 1;
   overflow-y: auto;
+  overflow-x: visible;
   padding: 6px 20px 14px;
 }
 .st-body::-webkit-scrollbar { width: 6px; }
@@ -195,3 +196,57 @@ html, body, #root {
   background: transparent;
 }
 .st-btn-ghost:hover { background: rgba(255, 255, 255, 0.10); }
+
+/* Model dropdown — visible custom list that replaces the unreliable
+   native <datalist>. Anchored under the Model input, clamps to ~220px
+   tall, click-outside via the scrim closes it. */
+.st-model-wrap {
+  position: relative;
+  flex: 1;
+}
+.st-dropdown {
+  position: fixed;
+  /* Position is computed in JS via inline style so we escape any parent
+     overflow clipping. The `top` and `left` set here are placeholders that
+     React overrides via the inline style attribute. */
+  top: 0;
+  left: 0;
+  width: 320px;
+  max-height: 220px;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  background: rgba(40, 40, 44, 0.96);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  z-index: 10;
+}
+.st-dropdown::-webkit-scrollbar { width: 6px; }
+.st-dropdown::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
+}
+.st-dropdown-item {
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.st-dropdown-item:hover { background: rgba(255, 255, 255, 0.10); }
+.st-dropdown-item.selected {
+  background: rgba(10, 132, 255, 0.30);
+  color: white;
+}
+.st-dropdown-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+}

@@ -408,18 +408,41 @@ fn main() {
             };
 
             // Create menu items
-            let shortcut_i = MenuItem::with_id(app, "shortcut", format!("Shortcut: {}  ▸", shortcut_display), true, None::<&str>)?;
+            // Tray menu structure (top → bottom):
+            //   Capture                 — invoke screenshot directly
+            //   Clipboard History       — open the spotlight panel directly
+            //   ─────────────
+            //   Settings…
+            //   Check for Updates…
+            //   Launch at Login (check)
+            //   ─────────────
+            //   Quit iShot
+            let capture_i = MenuItem::with_id(app, "capture", "Capture", true, None::<&str>)?;
+            let clipboard_i = MenuItem::with_id(app, "clipboard_history", "Clipboard History", true, None::<&str>)?;
             let separator1 = PredefinedMenuItem::separator(app)?;
-            let launch_i = CheckMenuItem::with_id(app, "launch_at_login", "Launch at Login", true, is_enabled, None::<&str>)?;
-            let clipboard_i = MenuItem::with_id(app, "clipboard_history", "Clipboard History  ⌘⇧V", true, None::<&str>)?;
             let settings_i = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let check_update_i = MenuItem::with_id(app, "check_update", "Check for Updates…", true, None::<&str>)?;
+            let launch_i = CheckMenuItem::with_id(app, "launch_at_login", "Launch at Login", true, is_enabled, None::<&str>)?;
             let separator2 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit iShot", true, None::<&str>)?;
 
-            let menu = Menu::with_items(app, &[&shortcut_i, &separator1, &launch_i, &clipboard_i, &settings_i, &check_update_i, &separator2, &quit_i])?;
-
-            let shortcut_item = shortcut_i.clone();
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &capture_i,
+                    &clipboard_i,
+                    &separator1,
+                    &settings_i,
+                    &check_update_i,
+                    &launch_i,
+                    &separator2,
+                    &quit_i,
+                ],
+            )?;
+            // `shortcut_display` no longer surfaces in the menu (its label was
+            // dropped per the new tray layout), but keep the variable used so
+            // the existing tray-menu logic still compiles cleanly.
+            let _ = shortcut_display;
             
             // Load the dedicated tray_icon.png (monochrome daisy on transparent
             // BG) and mark it as a macOS template image. With `icon_as_template`
@@ -435,8 +458,10 @@ fn main() {
                 .show_menu_on_left_click(true)
                 .on_menu_event(move |app, event| {
                     match event.id.as_ref() {
-                        "shortcut" => {
-                            open_shortcut_recorder(app);
+                        "capture" => {
+                            // Trigger screenshot directly — same code path the
+                            // global shortcut uses.
+                            trigger_screenshot(app);
                         }
                         "launch_at_login" => {
                             let autostart = app.autolaunch();
@@ -508,55 +533,44 @@ fn main() {
             // Start clipboard polling thread.
             services::clipboard_history::start_polling(app.handle().clone());
 
-            // Listen for shortcut changes
+            // Legacy `set-shortcut` event listener kept for backwards-compat
+            // with the old recorder.html window: still writes the config and
+            // re-registers the capture shortcut so users who happen to open
+            // the old window don't get a broken save flow. Settings panel is
+            // now the authoritative path (it calls re_register_shortcuts).
             let state_for_event = state.clone();
             let app_handle_for_event = app.handle().clone();
-            let shortcut_item_for_event = shortcut_item.clone();
-            
+
             app.listen("set-shortcut", move |event| {
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
                     let mods_val = payload.get("modifiers").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                     let key_str = payload.get("key").and_then(|v| v.as_str()).unwrap_or("A");
-                    
-                    // Save to config file
-                    let config = Config {
-                        modifiers: mods_val,
-                        key: key_str.to_string(),
-                    };
+
+                    let config = Config { modifiers: mods_val, key: key_str.to_string() };
                     save_config(&config);
-                    
-                    let mut modifiers = Modifiers::empty();
-                    if mods_val & 1 != 0 { modifiers |= Modifiers::META; }
-                    if mods_val & 2 != 0 { modifiers |= Modifiers::SHIFT; }
-                    if mods_val & 4 != 0 { modifiers |= Modifiers::ALT; }
-                    if mods_val & 8 != 0 { modifiers |= Modifiers::CONTROL; }
-                    
-                    let code = str_to_code(key_str);
-                    let new_shortcut = Shortcut::new(Some(modifiers), code);
+
+                    let new_shortcut = config_to_shortcut(&config);
                     let display = shortcut_to_display(&new_shortcut);
-                    
+
                     let _ = app_handle_for_event.global_shortcut().unregister_all();
-                    
                     let app_for_handler = app_handle_for_event.clone();
-                    let _ = app_handle_for_event.global_shortcut().on_shortcut(new_shortcut, move |_app, _shortcut, event| {
-                        if event.state == ShortcutState::Pressed {
-                            trigger_screenshot(&app_for_handler);
-                        }
-                    });
-                    
+                    let _ = app_handle_for_event
+                        .global_shortcut()
+                        .on_shortcut(new_shortcut, move |_app, _sc, event| {
+                            if event.state == ShortcutState::Pressed {
+                                trigger_screenshot(&app_for_handler);
+                            }
+                        });
+
                     {
                         let mut s = state_for_event.lock().unwrap();
                         s.current_shortcut = new_shortcut;
                         s.shortcut_display = display.clone();
                     }
-                    
-                    let _ = shortcut_item_for_event.set_text(format!("Shortcut: {}  ▸", display));
-                    
+
                     if let Some(recorder) = app_handle_for_event.get_webview_window("recorder") {
                         let _ = recorder.close();
                     }
-                    
-                    println!("Shortcut saved: {}", display);
                 }
             });
 
@@ -665,6 +679,7 @@ fn release_overlay_cursor(app: tauri::AppHandle) {
     let _ = app;
 }
 
+#[allow(dead_code)] // legacy recorder window — kept while the old HTML entry exists
 fn open_shortcut_recorder(app: &tauri::AppHandle) {
     if let Some(recorder) = app.get_webview_window("recorder") {
         let _ = recorder.set_focus();

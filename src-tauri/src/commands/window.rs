@@ -105,33 +105,34 @@ pub async fn set_overlay_passthrough(app_handle: tauri::AppHandle, ignore: bool)
 #[tauri::command]
 pub async fn show_scroll_panel(
     app_handle: tauri::AppHandle,
-    anchor_monitor_x: Option<f64>,
-    anchor_monitor_y: Option<f64>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 ) -> Result<(), String> {
     if let Some(panel) = app_handle.get_webview_window("scroll_panel") {
         let _ = panel.set_focus();
         return Ok(());
     }
 
-    // Find the target monitor. If the frontend passed coordinates, locate the
-    // monitor containing them; otherwise fall back to primary.
+    // Find the monitor containing the SELECTION CENTER — exactly the same logic
+    // as show_scroll_border, so the panel always lands on the same display as
+    // the capture region. (Passing the monitor origin alone was unreliable and
+    // put the panel on the wrong screen.)
+    let center_x = x + width / 2.0;
+    let center_y = y + height / 2.0;
     let monitors = app_handle.available_monitors().map_err(|e| e.to_string())?;
-    let target = if let (Some(mx), Some(my)) = (anchor_monitor_x, anchor_monitor_y) {
-        monitors.iter().find(|m| {
+    let monitor = monitors
+        .iter()
+        .find(|m| {
             let scale = m.scale_factor();
-            let logical_x = m.position().x as f64 / scale;
-            let logical_y = m.position().y as f64 / scale;
-            let logical_w = m.size().width as f64 / scale;
-            let logical_h = m.size().height as f64 / scale;
-            mx >= logical_x - 0.5
-                && mx < logical_x + logical_w + 0.5
-                && my >= logical_y - 0.5
-                && my < logical_y + logical_h + 0.5
-        }).cloned()
-    } else {
-        None
-    };
-    let monitor = target
+            let mx = m.position().x as f64 / scale;
+            let my = m.position().y as f64 / scale;
+            let mw = m.size().width as f64 / scale;
+            let mh = m.size().height as f64 / scale;
+            center_x >= mx && center_x < mx + mw && center_y >= my && center_y < my + mh
+        })
+        .cloned()
         .or_else(|| app_handle.primary_monitor().ok().flatten())
         .ok_or_else(|| "no monitor available".to_string())?;
 

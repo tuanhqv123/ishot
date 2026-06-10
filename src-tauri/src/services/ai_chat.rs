@@ -73,6 +73,12 @@ pub async fn stream_chat(
 
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
+    // Raw byte buffer for incomplete UTF-8 at chunk boundaries. A multi-byte
+    // char (Vietnamese diacritics, CJK, emoji…) can be split across two TCP
+    // chunks; decoding each chunk independently with from_utf8_lossy turns the
+    // split halves into `�`. We instead accumulate bytes and only move the
+    // VALID UTF-8 prefix into `buf`, holding any trailing partial char back.
+    let mut byte_buf: Vec<u8> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
         let bytes = match chunk {
@@ -82,7 +88,8 @@ pub async fn stream_chat(
                 return;
             }
         };
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        byte_buf.extend_from_slice(&bytes);
+        drain_valid_utf8(&mut byte_buf, &mut buf);
 
         // Process complete SSE events. An event ends at "\n\n"; anything after
         // the last terminator is incomplete and stays in the buffer.
@@ -129,6 +136,96 @@ pub async fn stream_chat(
     on_done();
 }
 
+/// Move every COMPLETE UTF-8 char from `byte_buf` into `out`, leaving any
+/// trailing incomplete multi-byte char in `byte_buf` for the next chunk.
+/// Genuinely invalid bytes are dropped (lossy) so a bad byte can't wedge it.
+fn drain_valid_utf8(byte_buf: &mut Vec<u8>, out: &mut String) {
+    loop {
+        match std::str::from_utf8(byte_buf) {
+            Ok(s) => {
+                out.push_str(s);
+                byte_buf.clear();
+                return;
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                if valid > 0 {
+                    // SAFETY: bytes [..valid] are valid UTF-8 per from_utf8.
+                    out.push_str(unsafe {
+                        std::str::from_utf8_unchecked(&byte_buf[..valid])
+                    });
+                }
+                match e.error_len() {
+                    // Incomplete trailing char — keep the tail for next chunk.
+                    None => {
+                        byte_buf.drain(..valid);
+                        return;
+                    }
+                    // Genuinely invalid bytes — drop them and keep going.
+                    Some(bad) => {
+                        byte_buf.drain(..valid + bad);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { format!("{}…", &s[..max]) }
+    // Count/cut by CHARS, not bytes — slicing `&s[..max]` panics if `max`
+    // lands inside a multi-byte char (e.g. an error message in Vietnamese).
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max).collect();
+        format!("{}…", cut)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Vietnamese text whose multi-byte chars get split at every byte
+    /// boundary must still reassemble perfectly — this is the streaming bug
+    /// that turned diacritics into `�`.
+    #[test]
+    fn drain_utf8_reassembles_split_vietnamese() {
+        let text = "Tiếng Việt: chào bạn, hôm nay thế nào? 日本語 🎉";
+        let bytes = text.as_bytes();
+        let mut byte_buf = Vec::new();
+        let mut out = String::new();
+        // Feed ONE byte at a time — the worst-case chunk boundary.
+        for &b in bytes {
+            byte_buf.push(b);
+            drain_valid_utf8(&mut byte_buf, &mut out);
+        }
+        assert!(byte_buf.is_empty(), "no trailing bytes should remain");
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn drain_utf8_holds_incomplete_tail() {
+        // "ế" is 3 bytes (E1 BA BF). After 2 bytes nothing should emit yet.
+        let full = "ế".as_bytes();
+        let mut byte_buf = full[..2].to_vec();
+        let mut out = String::new();
+        drain_valid_utf8(&mut byte_buf, &mut out);
+        assert_eq!(out, "");
+        assert_eq!(byte_buf.len(), 2);
+        // Completing the char emits it and empties the buffer.
+        byte_buf.push(full[2]);
+        drain_valid_utf8(&mut byte_buf, &mut out);
+        assert_eq!(out, "ế");
+        assert!(byte_buf.is_empty());
+    }
+
+    #[test]
+    fn truncate_is_char_safe() {
+        // Cutting Vietnamese mid-string must not panic on a byte boundary.
+        let s = "Lỗi mạng khi kết nối đến máy chủ";
+        let t = truncate(s, 5);
+        assert!(t.ends_with('…'));
+        assert_eq!(t.chars().count(), 6); // 5 chars + ellipsis
+    }
 }

@@ -3,12 +3,16 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
 	ArrowRight,
+	ArrowUp,
 	Check,
 	Circle,
 	Download,
-	Grid3X3,
+	Droplet,
+	GripVertical,
 	Languages,
 	Minus,
+	Palette,
+	PenLine,
 	Pencil,
 	ScanText,
 	ImageDown,
@@ -21,6 +25,8 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rough from "roughjs";
+import { getStroke } from "perfect-freehand";
 
 interface AiChatMsg {
 	role: "system" | "user" | "assistant";
@@ -74,8 +80,64 @@ interface Annotation {
 	text?: string;
 	fontSize?: number;
 	strokeWidth?: number;
+	sloppiness?: Sloppiness;
+	seed?: number;
 	bold?: boolean;
 	underline?: boolean;
+}
+
+// Excalidraw-style "Sloppiness": how hand-drawn / rough the stroke looks.
+// 0 = smooth (architect), 1 = artist, 2 = cartoonist. Maps to rough.js
+// roughness + bowing.
+type Sloppiness = 0 | 1 | 2;
+function roughFor(s: Sloppiness | undefined): { roughness: number; bowing: number } {
+	switch (s) {
+		case 2:
+			return { roughness: 2.6, bowing: 2 };
+		case 1:
+			return { roughness: 1.3, bowing: 1.2 };
+		default:
+			return { roughness: 0.4, bowing: 0.6 };
+	}
+}
+
+// Render a freehand stroke as a smooth, naturally-tapered filled path using
+// perfect-freehand (the same lib Excalidraw uses) — replaces the old raw
+// lineTo polyline that looked jagged/streaky.
+function drawFreehand(
+	ctx: CanvasRenderingContext2D,
+	pts: { x: number; y: number }[],
+	color: string,
+	width: number,
+) {
+	if (pts.length === 0) return;
+	const outline = getStroke(
+		pts.map((p) => [p.x, p.y]),
+		{
+			size: Math.max(4, width * 2),
+			thinning: 0.55,
+			smoothing: 0.6,
+			streamline: 0.5,
+		},
+	);
+	if (outline.length < 2) return;
+	ctx.fillStyle = color;
+	ctx.beginPath();
+	ctx.moveTo(outline[0][0], outline[0][1]);
+	for (let i = 1; i < outline.length; i++)
+		ctx.lineTo(outline[i][0], outline[i][1]);
+	ctx.closePath();
+	ctx.fill();
+}
+
+// Translate an annotation by (dx, dy) — used for click-drag move. Each shape
+// type carries its geometry differently.
+function moveAnnotation(a: Annotation, dx: number, dy: number): Annotation {
+	if (a.type === "draw" && a.path)
+		return { ...a, path: a.path.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+	if (a.ex !== undefined)
+		return { ...a, x: a.x + dx, y: a.y + dy, ex: a.ex + dx, ey: (a.ey ?? 0) + dy };
+	return { ...a, x: a.x + dx, y: a.y + dy };
 }
 
 interface DisplayCapture {
@@ -98,6 +160,10 @@ type Tool =
 	| null;
 
 let annotationId = 0;
+// Fixed rough.js seed for the live drag preview so the shape doesn't
+// re-jitter on every mousemove (only the committed annotation gets a unique
+// seed derived from its id).
+const PREVIEW_SEED = 42;
 
 function App() {
 	const [stage, setStage] = useState<Stage>("idle");
@@ -145,6 +211,12 @@ function App() {
 	const [selectedAnnotation, setSelectedAnnotation] = useState<number | null>(
 		null,
 	);
+	// Active click-drag move of an annotation: original snapshot + grab point.
+	const annDragRef = useRef<{
+		startX: number;
+		startY: number;
+		orig: Annotation;
+	} | null>(null);
 	const [blurStrength, setBlurStrength] = useState(10);
 	const [tempBlur, setTempBlur] = useState<Region | null>(null);
 	const [fontSize, setFontSize] = useState(
@@ -152,7 +224,15 @@ function App() {
 	);
 	const [fontBold, setFontBold] = useState(false);
 	const [fontUnderline, setFontUnderline] = useState(false);
-	const [strokeWidth, setStrokeWidth] = useState(2);
+	const [strokeWidth, setStrokeWidth] = useState(
+		() => Number(localStorage.getItem("ishot-stroke-w")) || 4,
+	);
+	const [sloppiness, setSloppiness] = useState<Sloppiness>(
+		() => (Number(localStorage.getItem("ishot-sloppiness")) as Sloppiness) || 0,
+	);
+	// Last shape picked in the options row — the row-1 "shapes" button
+	// re-activates this one so clicking it always drops you into a usable tool.
+	const [lastShape, setLastShape] = useState<Tool>("rect");
 	const [editingTextId, setEditingTextId] = useState<number | null>(null);
 	const [shiftHeld, setShiftHeld] = useState(false);
 	const [lockedByOther, setLockedByOther] = useState(false);
@@ -166,11 +246,42 @@ function App() {
 	const toolbarRow2Ref = useRef<HTMLDivElement | null>(null);
 	const [toolbarRow1W, setToolbarRow1W] = useState(440);
 	const [toolbarRow2W, setToolbarRow2W] = useState(440);
-	// Auto-scroll speed in pixels-per-second. Presets: Slow=300, Medium=600, Fast=1200.
-	// Higher = faster total capture but more risk of mid-animation captures.
-	const [scrollSpeedPps, setScrollSpeedPps] = useState<number>(
-		() => Number(localStorage.getItem("ishot-scroll-speed")) || 600,
+	// User-dragged displacement for floating surfaces, relative to their
+	// computed anchor. Needed on notched MacBooks: a full-screen selection
+	// centers the toolbar/chat under the camera housing where it can't be
+	// reached. A grip handle lets the user drag the surface anywhere.
+	const [toolbarOffset, setToolbarOffset] = useState({ x: 0, y: 0 });
+	const [aiOffset, setAiOffset] = useState({ x: 0, y: 0 });
+	// Returns a mousedown handler that drags a {x,y} offset by following the
+	// cursor. Shared by the toolbar grip and the chat header.
+	const makeDragStart = useCallback(
+		(
+			offset: { x: number; y: number },
+			setOffset: (o: { x: number; y: number }) => void,
+		) =>
+			(e: React.MouseEvent) => {
+				e.preventDefault();
+				e.stopPropagation();
+				const startX = e.clientX;
+				const startY = e.clientY;
+				const baseX = offset.x;
+				const baseY = offset.y;
+				const move = (ev: MouseEvent) =>
+					setOffset({
+						x: baseX + ev.clientX - startX,
+						y: baseY + ev.clientY - startY,
+					});
+				const up = () => {
+					window.removeEventListener("mousemove", move);
+					window.removeEventListener("mouseup", up);
+				};
+				window.addEventListener("mousemove", move);
+				window.addEventListener("mouseup", up);
+			},
+		[],
 	);
+	const onToolbarDragStart = makeDragStart(toolbarOffset, setToolbarOffset);
+	const onAiDragStart = makeDragStart(aiOffset, setAiOffset);
 	const [showScreenshot] = useState(true);
 
 	// Color picker
@@ -219,6 +330,8 @@ function App() {
 		setLockedByOther(false);
 		setScrollCapturing(false);
 		setScrollFrames(0);
+		setToolbarOffset({ x: 0, y: 0 });
+		setAiOffset({ x: 0, y: 0 });
 		// AI chat — tear down listeners if a stream is active.
 		if (aiAbortRef.current) {
 			aiAbortRef.current();
@@ -482,6 +595,9 @@ function App() {
 			);
 		} catch (e) {
 			console.error(e);
+			// Surface the failure — previously this died silently in the console
+			// and the user just saw the spinner stop with nothing happening.
+			new Notification("iShot — OCR failed", { body: String(e) });
 		} finally {
 			setOcrLoading(false);
 		}
@@ -509,9 +625,51 @@ function App() {
 	const aiAbortRef = useRef<(() => void) | null>(null);
 	const aiScrollRef = useRef<HTMLDivElement>(null);
 
+	// --- Mode exclusivity helpers ---------------------------------------
+	// AI chat, Translate, Scroll capture and the annotation tools are
+	// mutually exclusive modes. Every entry point calls the close helpers
+	// of the OTHER modes first, so two modes can never be active at once
+	// (previously: Translate + AI dialogs could stack, scroll-ready could
+	// coexist with an in-flight OCR, etc.).
+	const closeAiPanel = useCallback(() => {
+		if (aiAbortRef.current) {
+			aiAbortRef.current();
+			aiAbortRef.current = null;
+		}
+		setShowAi(false);
+		setAiMessages([]);
+		setAiInput("");
+		setAiSeedText("");
+		setAiStreaming(false);
+		setAiLoading(false);
+		setAiOffset({ x: 0, y: 0 });
+	}, []);
+
+	const closeTranslatePanel = useCallback(() => {
+		setShowTranslate(false);
+		setTranslatedText("");
+		setTranslateSource("");
+		setTranslateLoading(false);
+	}, []);
+
+	const exitScrollReady = useCallback(() => {
+		setScrollCapturing(false);
+		setScrollFrames(0);
+		invoke("cancel_scroll_capture").catch(() => {});
+	}, []);
 
 	const handleAi = useCallback(async () => {
 		if (displayCaptures.length === 0 || !selection || aiLoading) return;
+		if (showAi) {
+			// Toggle: clicking the AI button while the dialog is open closes it.
+			closeAiPanel();
+			return;
+		}
+		closeTranslatePanel();
+		exitScrollReady();
+		setTool(null);
+		setSelectedText("");
+		setSelectedBlockIndices(new Set());
 		setAiLoading(true);
 		setShowAi(true);
 		setAiMessages([]);
@@ -557,7 +715,16 @@ function App() {
 		} finally {
 			setAiLoading(false);
 		}
-	}, [displayCaptures, selection, aiLoading, findDisplay]);
+	}, [
+		displayCaptures,
+		selection,
+		aiLoading,
+		showAi,
+		findDisplay,
+		closeAiPanel,
+		closeTranslatePanel,
+		exitScrollReady,
+	]);
 
 	const sendAiPrompt = useCallback(async () => {
 		const prompt = aiInput.trim();
@@ -727,6 +894,11 @@ function App() {
 
 	const handleTranslate = useCallback(async () => {
 		if (displayCaptures.length === 0 || !selection || translateLoading) return;
+		closeAiPanel();
+		exitScrollReady();
+		setTool(null);
+		setSelectedText("");
+		setSelectedBlockIndices(new Set());
 		setTranslateLoading(true);
 		setShowTranslate(true);
 		setTranslatedText("");
@@ -787,17 +959,18 @@ function App() {
 		findDisplay,
 		runTranslation,
 		translateTarget,
+		closeAiPanel,
+		exitScrollReady,
 	]);
 
 	const handleToolChange = useCallback(
 		(newTool: Tool) => {
+			// Annotation tools are exclusive with the dialog/scroll modes.
+			closeAiPanel();
+			closeTranslatePanel();
+			exitScrollReady();
 			setTool(newTool);
 			setSelectedAnnotation(null);
-			// Picking ANY annotation tool exits scroll-ready mode. Without this,
-			// the scroll-shot icon stays highlighted even after switching to e.g.
-			// Rect — two tools appearing selected at the same time.
-			setScrollCapturing(false);
-			setScrollFrames(0);
 			if (newTool === "text" && textBlocks.length === 0 && !ocrLoading)
 				performOcr();
 			if (newTool !== "text") {
@@ -805,7 +978,14 @@ function App() {
 				setSelectedBlockIndices(new Set());
 			}
 		},
-		[textBlocks.length, ocrLoading, performOcr],
+		[
+			textBlocks.length,
+			ocrLoading,
+			performOcr,
+			closeAiPanel,
+			closeTranslatePanel,
+			exitScrollReady,
+		],
 	);
 
 	useEffect(() => {
@@ -860,6 +1040,7 @@ function App() {
 			setTool(null);
 			setSelectedAnnotation(null);
 			setTempBlur(null);
+			setToolbarOffset({ x: 0, y: 0 });
 			// Reset window-detect: every new capture session starts in auto mode.
 			// Snapshot the OS windows now so hover hit-testing is instant.
 			setSelectMode("auto");
@@ -875,16 +1056,28 @@ function App() {
 		};
 	}, []);
 
-	// Click Scroll icon on toolbar → enter scroll-ready mode (show Start/Cancel)
+	// Click Scroll icon on toolbar → start MANUAL scroll capture immediately.
+	//
+	// The user scrolls the page themselves; Rust passively captures frames,
+	// detects the scroll offset via NCC and stitches. No synthetic scroll
+	// events, no speed presets, no Accessibility permission needed. The
+	// session ends on Esc (scroll panel) or after ~12 s without scrolling.
 	const handleStartScroll = useCallback(async () => {
-		if (!selection) return;
+		if (!selection || scrollCapturing) return;
 		const dc = findDisplay();
 		if (!dc) return;
+		closeAiPanel();
+		closeTranslatePanel();
+		setSelectedText("");
+		setSelectedBlockIndices(new Set());
 		const monitorIdx = getWindowMonitorIndex();
-		const screenX = selection.x + monitors[monitorIdx].x;
-		const screenY = selection.y + monitors[monitorIdx].y;
-		const screenW = selection.width;
-		const screenH = selection.height;
+		const mon = monitors[monitorIdx];
+		const monX = mon?.x ?? 0;
+		const monY = mon?.y ?? 0;
+		// SCREEN-space (logical-screen) coords — the scroll-border window and
+		// the capture rect both need these, NOT the overlay-local selection.
+		const screenX = monX + selection.x;
+		const screenY = monY + selection.y;
 		setScrollCapturing(true);
 		setScrollFrames(0);
 		setTool(null);
@@ -892,41 +1085,11 @@ function App() {
 			await invoke("prepare_scroll_capture", {
 				x: screenX,
 				y: screenY,
-				width: screenW,
-				height: screenH,
+				width: selection.width,
+				height: selection.height,
 			});
-		} catch (e) {
-			console.error("[scroll] prepare failed:", e);
-			setScrollCapturing(false);
-		}
-	}, [selection, findDisplay, monitors]);
-
-	// Click Start button → hide overlay, show border + panel, kick off AUTO-SCROLL.
-	//
-	// Auto-scroll path means: Rust dispatches CGScrollEvents to the window under
-	// the cursor and pastes captured frames at KNOWN offsets (no NCC needed).
-	// We must position the cursor over the capture region so scroll events land
-	// in the right window — that's the `cursor_anchor_*` payload.
-	const handleScrollBegin = useCallback(async () => {
-		if (!selection) return;
-		try {
-			const monitorIdx = getWindowMonitorIndex();
-			const mon = monitors[monitorIdx];
-			const monX = mon?.x ?? 0;
-			const monY = mon?.y ?? 0;
-			// SCREEN-space (logical-screen) coords. Two windows need to know
-			// about these: the scroll-border (so it draws on the right monitor)
-			// and the cursor warp (so scroll events land in the right app).
-			//
-			// Previously we passed selection.x/y (LOCAL to the overlay window)
-			// to show_scroll_border, which then treated those as screen coords
-			// — fine on the primary monitor (offset 0,0), broken on monitor 2
-			// (the border ended up on monitor 1 at the wrong place).
-			const screenX = monX + selection.x;
-			const screenY = monY + selection.y;
-			const anchorX = screenX + selection.width / 2;
-			const anchorY = screenY + selection.height / 2;
-
+			// Hide the overlay BEFORE the first frame is captured so neither
+			// the dim layer nor the selection border bakes into the output.
 			await invoke("hide_overlay");
 			await invoke("show_scroll_border", {
 				x: screenX,
@@ -934,35 +1097,33 @@ function App() {
 				width: selection.width,
 				height: selection.height,
 			});
+			// Pass the SELECTION rect (screen-space) so the panel lands on the
+			// same monitor as the border — found by the selection's center,
+			// identical to show_scroll_border. Passing the monitor origin alone
+			// was unreliable and put the panel on the wrong display.
 			await invoke("show_scroll_panel", {
-				anchorMonitorX: monX,
-				anchorMonitorY: monY,
+				x: screenX,
+				y: screenY,
+				width: selection.width,
+				height: selection.height,
 			});
-			await invoke("start_auto_scroll_capture", {
-				cursorAnchorX: anchorX,
-				cursorAnchorY: anchorY,
-				speedPps: scrollSpeedPps,
-				maxHeight: 20000,
-			});
+			await invoke("start_scroll_capture");
 		} catch (e) {
-			console.error("[scroll] auto-start failed:", e);
-			// Backend returns the sentinel "accessibility-required" when the
-			// macOS Accessibility permission is missing. The OS has already
-			// surfaced its consent dialog at this point — we just need to
-			// tear the panel down and tell the user what to do next.
-			if (typeof e === "string" && e.includes("accessibility-required")) {
-				new Notification("iShot — Accessibility permission needed", {
-					body:
-						"Enable iShot under System Settings → Privacy & Security → Accessibility, then try Scroll Capture again.",
-				});
-				try { await invoke("hide_scroll_panel"); } catch {}
-				try { await invoke("hide_scroll_border"); } catch {}
-				await cancelCapture();
-				return;
-			}
+			console.error("[scroll] start failed:", e);
+			try { await invoke("hide_scroll_panel"); } catch {}
+			try { await invoke("hide_scroll_border"); } catch {}
 			setScrollCapturing(false);
+			await cancelCapture();
 		}
-	}, [selection, monitors, scrollSpeedPps, cancelCapture]);
+	}, [
+		selection,
+		scrollCapturing,
+		findDisplay,
+		monitors,
+		closeAiPanel,
+		closeTranslatePanel,
+		cancelCapture,
+	]);
 
 	// Cancel scroll (before or during capture)
 	const handleScrollCancel = useCallback(async () => {
@@ -1032,16 +1193,13 @@ function App() {
 				height: number;
 			};
 			// Only re-copy from JS if Rust didn't already handle it (legacy
-			// manual-scroll path). Length check is what distinguishes — auto
-			// path sends `data: []`, legacy sends a full PNG byte array.
+			// path). Length check is what distinguishes — the capture thread
+			// sends `data: []` after copying to the clipboard itself.
 			if (payload.data && payload.data.length > 0) {
 				await invoke("copy_to_clipboard", { imageBytes: payload.data });
 			}
-			if (payload.width && payload.height) {
-				new Notification("iShot", {
-					body: `Scroll capture saved (${payload.width}x${payload.height})`,
-				});
-			}
+			// No notification here — the scroll panel already shows one for
+			// this event; doubling up produced two banners per capture.
 			setScrollCapturing(false);
 			await invoke("hide_scroll_panel").catch(() => {});
 			await invoke("hide_scroll_border").catch(() => {});
@@ -1101,6 +1259,16 @@ function App() {
 				return;
 			}
 			if (e.key === "Escape") {
+				// Dialog-first: Esc closes an open AI/Translate panel and keeps
+				// the capture session alive; a second Esc then cancels as usual.
+				if (showAi) {
+					closeAiPanel();
+					return;
+				}
+				if (showTranslate) {
+					closeTranslatePanel();
+					return;
+				}
 				if (scrollCapturing) {
 					// scrollFrames > 0 means the user has already pressed Start and the
 					// capture loop has stitched at least one step — Esc here means
@@ -1147,6 +1315,10 @@ function App() {
 		scrollFrames,
 		handleScrollCancel,
 		handleScrollFinalize,
+		showAi,
+		showTranslate,
+		closeAiPanel,
+		closeTranslatePanel,
 	]);
 
 	useEffect(() => {
@@ -1163,59 +1335,66 @@ function App() {
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 		ctx.lineCap = "round";
 		ctx.lineJoin = "round";
+		const rc = rough.canvas(canvas);
 
 		for (const ann of annotations) {
 			if (ann.type === "blur" || ann.type === "textbox") continue; // textbox rendered as HTML overlay
 			const isSelected = ann.id === selectedAnnotation;
-			ctx.strokeStyle = isSelected ? "#007aff" : ann.color || "#ff0000";
-			ctx.lineWidth = isSelected
-				? (ann.strokeWidth || 2) + 1
-				: ann.strokeWidth || 2;
+			const color = isSelected ? "#007aff" : ann.color || "#ff0000";
+			const lw = isSelected ? (ann.strokeWidth || 2) + 1 : ann.strokeWidth || 2;
+			// rough.js options. Stable `seed` (per-annotation) keeps the hand-drawn
+			// jitter identical across every redraw instead of re-randomizing.
+			const ro = roughFor(ann.sloppiness);
+			const opts = {
+				stroke: color,
+				strokeWidth: lw,
+				roughness: ro.roughness,
+				bowing: ro.bowing,
+				seed: ann.seed || ann.id || 1,
+			};
 
 			if (ann.type === "rect" && ann.w !== undefined) {
-				ctx.strokeRect(ann.x, ann.y, ann.w, ann.h!);
+				// Normalize so negative w/h (drawn right-to-left) render cleanly.
+				rc.rectangle(
+					Math.min(ann.x, ann.x + ann.w),
+					Math.min(ann.y, ann.y + ann.h!),
+					Math.abs(ann.w),
+					Math.abs(ann.h!),
+					opts,
+				);
 			} else if (ann.type === "oval" && ann.w !== undefined) {
-				ctx.beginPath();
-				ctx.ellipse(
+				rc.ellipse(
 					ann.x + ann.w / 2,
 					ann.y + ann.h! / 2,
-					Math.abs(ann.w / 2),
-					Math.abs(ann.h! / 2),
-					0,
-					0,
-					Math.PI * 2,
+					Math.abs(ann.w),
+					Math.abs(ann.h!),
+					opts,
 				);
-				ctx.stroke();
 			} else if (ann.type === "arrow" && ann.ex !== undefined) {
-				const headLen = 12,
+				// Bold "V" head that grows with stroke width (wide 36° opening).
+				const headLen = Math.max(18, lw * 5.5),
+					spread = Math.PI / 5,
 					angle = Math.atan2(ann.ey! - ann.y, ann.ex - ann.x);
-				ctx.beginPath();
-				ctx.moveTo(ann.x, ann.y);
-				ctx.lineTo(ann.ex, ann.ey!);
-				ctx.stroke();
-				ctx.beginPath();
-				ctx.moveTo(ann.ex, ann.ey!);
-				ctx.lineTo(
-					ann.ex - headLen * Math.cos(angle - Math.PI / 6),
-					ann.ey! - headLen * Math.sin(angle - Math.PI / 6),
+				rc.line(ann.x, ann.y, ann.ex, ann.ey!, opts);
+				rc.line(
+					ann.ex,
+					ann.ey!,
+					ann.ex - headLen * Math.cos(angle - spread),
+					ann.ey! - headLen * Math.sin(angle - spread),
+					opts,
 				);
-				ctx.moveTo(ann.ex, ann.ey!);
-				ctx.lineTo(
-					ann.ex - headLen * Math.cos(angle + Math.PI / 6),
-					ann.ey! - headLen * Math.sin(angle + Math.PI / 6),
+				rc.line(
+					ann.ex,
+					ann.ey!,
+					ann.ex - headLen * Math.cos(angle + spread),
+					ann.ey! - headLen * Math.sin(angle + spread),
+					opts,
 				);
-				ctx.stroke();
 			} else if (ann.type === "line" && ann.ex !== undefined) {
-				ctx.beginPath();
-				ctx.moveTo(ann.x, ann.y);
-				ctx.lineTo(ann.ex, ann.ey!);
-				ctx.stroke();
-			} else if (ann.type === "draw" && ann.path && ann.path.length > 1) {
-				ctx.beginPath();
-				ctx.moveTo(ann.path[0].x, ann.path[0].y);
-				for (let i = 1; i < ann.path.length; i++)
-					ctx.lineTo(ann.path[i].x, ann.path[i].y);
-				ctx.stroke();
+				rc.line(ann.x, ann.y, ann.ex, ann.ey!, opts);
+			} else if (ann.type === "draw" && ann.path && ann.path.length > 0) {
+				// Smooth, naturally-tapered freehand via perfect-freehand.
+				drawFreehand(ctx, ann.path, color, ann.strokeWidth || 4);
 			}
 		}
 	}, [annotations, selection, selectedAnnotation]);
@@ -1305,14 +1484,35 @@ function App() {
 		// Auto-detect: convert cursor to screen coords and hit-test the cached
 		// window list. Hover only previews — the user has to click (or
 		// click-drag) to commit, matching native macOS Cmd+Shift+4+Space.
-		if (selectMode === "auto" && snappedWindows.length > 0) {
+		if (selectMode === "auto") {
 			const mon = monLocal();
 			const sx = mon.x + e.clientX;
 			const sy = mon.y + e.clientY;
-			const hit = snappedWindows.find(
-				(w) => sx >= w.x && sx < w.x + w.w && sy >= w.y && sy < w.y + w.h,
-			) ?? null;
-			setHoveredWindow(hit);
+			const hit = snappedWindows.find((w) => {
+				if (!(sx >= w.x && sx < w.x + w.w && sy >= w.y && sy < w.y + w.h))
+					return false;
+				// Skip maximized/background surfaces that fill the whole monitor —
+				// those resolve to the full-screen target below anyway.
+				const coversScreen = w.w >= mon.width * 0.97 && w.h >= mon.height * 0.97;
+				return !coversScreen;
+			});
+			// Over a real window → highlight it. Over empty desktop / a full-screen
+			// background → highlight the WHOLE monitor so a click captures the
+			// entire screen.
+			setHoveredWindow(
+				hit ?? {
+					id: -1,
+					x: mon.x,
+					y: mon.y,
+					w: mon.width,
+					h: mon.height,
+					app_name: "Screen",
+					title: "",
+					layer: 0,
+					alpha: 1,
+					pid: 0,
+				},
+			);
 		}
 	};
 
@@ -1491,14 +1691,20 @@ function App() {
 		const x = e.clientX - rect.left,
 			y = e.clientY - rect.top;
 
-		// If no tool selected, try to select annotation
-		if (!tool) {
-			for (let i = annotations.length - 1; i >= 0; i--) {
-				if (isPointInAnnotation(annotations[i], x, y)) {
-					setSelectedAnnotation(annotations[i].id);
-					return;
-				}
+		// Clicking directly on an existing annotation selects it AND begins a
+		// click-hold drag to move it — even while a drawing tool is active. This
+		// keeps the tool selected for continuous drawing (below) while allowing
+		// "click to select / drag to move".
+		for (let i = annotations.length - 1; i >= 0; i--) {
+			if (isPointInAnnotation(annotations[i], x, y)) {
+				setSelectedAnnotation(annotations[i].id);
+				annDragRef.current = { startX: x, startY: y, orig: annotations[i] };
+				return;
 			}
+		}
+
+		// No tool → plain selection mode; empty click just clears selection.
+		if (!tool) {
 			setSelectedAnnotation(null);
 			return;
 		}
@@ -1551,6 +1757,17 @@ function App() {
 	);
 
 	const handleCanvasMouseMove = (e: React.MouseEvent) => {
+		// Dragging an existing annotation to move it.
+		if (annDragRef.current) {
+			const d = annDragRef.current;
+			const r = e.currentTarget.getBoundingClientRect();
+			const dx = e.clientX - r.left - d.startX;
+			const dy = e.clientY - r.top - d.startY;
+			setAnnotations((prev) =>
+				prev.map((a) => (a.id === d.orig.id ? moveAnnotation(d.orig, dx, dy) : a)),
+			);
+			return;
+		}
 		if (!isDrawing || !drawStart || !tool) return;
 		const rect = e.currentTarget.getBoundingClientRect();
 		const rawX = e.clientX - rect.left,
@@ -1575,60 +1792,66 @@ function App() {
 		ctx.strokeStyle = strokeColor;
 		ctx.lineWidth = strokeWidth;
 		ctx.lineCap = "round";
+		// Live preview uses the same rough.js renderer with a FIXED seed so the
+		// shape stays stable (no re-jitter) while the user drags it out.
+		const rc = rough.canvas(canvasRef.current!);
+		const ro = roughFor(sloppiness);
+		const opts = {
+			stroke: strokeColor,
+			strokeWidth,
+			roughness: ro.roughness,
+			bowing: ro.bowing,
+			seed: PREVIEW_SEED,
+		};
 
 		if (tool === "rect")
-			ctx.strokeRect(
-				drawStart.x,
-				drawStart.y,
-				x - drawStart.x,
-				y - drawStart.y,
+			rc.rectangle(
+				Math.min(drawStart.x, x),
+				Math.min(drawStart.y, y),
+				Math.abs(x - drawStart.x),
+				Math.abs(y - drawStart.y),
+				opts,
 			);
 		else if (tool === "oval") {
-			ctx.beginPath();
-			ctx.ellipse(
+			rc.ellipse(
 				(drawStart.x + x) / 2,
 				(drawStart.y + y) / 2,
-				Math.abs(x - drawStart.x) / 2,
-				Math.abs(y - drawStart.y) / 2,
-				0,
-				0,
-				Math.PI * 2,
+				Math.abs(x - drawStart.x),
+				Math.abs(y - drawStart.y),
+				opts,
 			);
-			ctx.stroke();
 		} else if (tool === "arrow") {
-			const headLen = 12,
+			const headLen = Math.max(18, strokeWidth * 5.5),
+				spread = Math.PI / 5,
 				angle = Math.atan2(y - drawStart.y, x - drawStart.x);
-			ctx.beginPath();
-			ctx.moveTo(drawStart.x, drawStart.y);
-			ctx.lineTo(x, y);
-			ctx.stroke();
-			ctx.beginPath();
-			ctx.moveTo(x, y);
-			ctx.lineTo(
-				x - headLen * Math.cos(angle - Math.PI / 6),
-				y - headLen * Math.sin(angle - Math.PI / 6),
+			rc.line(drawStart.x, drawStart.y, x, y, opts);
+			rc.line(
+				x,
+				y,
+				x - headLen * Math.cos(angle - spread),
+				y - headLen * Math.sin(angle - spread),
+				opts,
 			);
-			ctx.moveTo(x, y);
-			ctx.lineTo(
-				x - headLen * Math.cos(angle + Math.PI / 6),
-				y - headLen * Math.sin(angle + Math.PI / 6),
+			rc.line(
+				x,
+				y,
+				x - headLen * Math.cos(angle + spread),
+				y - headLen * Math.sin(angle + spread),
+				opts,
 			);
-			ctx.stroke();
 		} else if (tool === "line") {
-			ctx.beginPath();
-			ctx.moveTo(drawStart.x, drawStart.y);
-			ctx.lineTo(x, y);
-			ctx.stroke();
+			rc.line(drawStart.x, drawStart.y, x, y, opts);
 		} else if (tool === "draw" && currentPath.length > 0) {
-			ctx.beginPath();
-			ctx.moveTo(currentPath[0].x, currentPath[0].y);
-			for (const p of currentPath) ctx.lineTo(p.x, p.y);
-			ctx.lineTo(rawX, rawY);
-			ctx.stroke();
+			drawFreehand(ctx, [...currentPath, { x: rawX, y: rawY }], strokeColor, strokeWidth);
 		}
 	};
 
 	const handleCanvasMouseUp = (e: React.MouseEvent) => {
+		// Finish an annotation-move drag.
+		if (annDragRef.current) {
+			annDragRef.current = null;
+			return;
+		}
 		if (!isDrawing || !drawStart || !tool) return;
 		const rect = e.currentTarget.getBoundingClientRect();
 		const rawX = e.clientX - rect.left,
@@ -1648,6 +1871,8 @@ function App() {
 					h: y - drawStart.y,
 					color: strokeColor,
 					strokeWidth,
+					sloppiness,
+					seed: id,
 				},
 			]);
 		else if (tool === "oval")
@@ -1662,6 +1887,8 @@ function App() {
 					h: y - drawStart.y,
 					color: strokeColor,
 					strokeWidth,
+					sloppiness,
+					seed: id,
 				},
 			]);
 		else if (tool === "arrow")
@@ -1676,6 +1903,8 @@ function App() {
 					ey: y,
 					color: strokeColor,
 					strokeWidth,
+					sloppiness,
+					seed: id,
 				},
 			]);
 		else if (tool === "line")
@@ -1690,6 +1919,8 @@ function App() {
 					ey: y,
 					color: strokeColor,
 					strokeWidth,
+					sloppiness,
+					seed: id,
 				},
 			]);
 		else if (tool === "draw")
@@ -1703,6 +1934,8 @@ function App() {
 					path: [...currentPath, { x: rawX, y: rawY }],
 					color: strokeColor,
 					strokeWidth,
+					sloppiness,
+					seed: id,
 				},
 			]);
 		else if (
@@ -1748,7 +1981,9 @@ function App() {
 			setEditingTextId(id);
 		}
 
-		if (tool !== "textbox") setTool(null);
+		// Keep the tool active after a stroke so the user can keep drawing
+		// (Excalidraw "locked tool" behavior). They switch tools via the
+		// toolbar, or click an existing shape to select it.
 		setIsDrawing(false);
 		setDrawStart(null);
 		setCurrentPath([]);
@@ -2204,19 +2439,14 @@ function App() {
 
 					{/* Toolbars — flip above if no space below.
 					    Row 1 always shows tool buttons.
-					    Row 2 shows tool-specific options (color/size/etc.) OR the
-					    scroll-shot speed selector + Start/Cancel when the user
-					    has clicked the scroll-capture icon.
-					    Critically: the main toolbar stays visible in scroll-shot
-					    "ready" state so the user doesn't lose context — the speed
-					    selector simply takes the place of the regular options row. */}
-					{(() => {
+					    Row 2 shows tool-specific options (shape/stroke/color etc.).
+					    Hidden entirely while the AI chat dialog is open — the
+					    dialog IS the active surface; Esc brings the toolbar back. */}
+					{!showAi && (() => {
 							const FONT_SIZES = [
 								10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48,
 							];
-							const inScrollReady = scrollCapturing && scrollFrames === 0;
 							const hasRow2 =
-								inScrollReady ||
 								tool === "rect" ||
 								tool === "oval" ||
 								tool === "arrow" ||
@@ -2225,8 +2455,10 @@ function App() {
 								tool === "textbox" ||
 								tool === "blur" ||
 								!!selectedBlurAnn;
-							const row1H = 42,
-								row2H = 36,
+							// row1: 32px buttons + 2×6px padding = 44. row2: 28px controls
+							// + 2×6px padding = 40. Keep in sync with --ctrl/--pad tokens.
+							const row1H = 44,
+								row2H = 40,
 								gap = 4;
 							const totalH = row1H + (hasRow2 ? row2H + gap : 0);
 							const spaceBelow =
@@ -2235,7 +2467,10 @@ function App() {
 							const baseTop = showAbove
 								? selection.y - totalH - 8
 								: selection.y + selection.height + 8;
-							const row1Top = Math.max(4, baseTop);
+							const row1Top = Math.min(
+								Math.max(4, Math.max(4, baseTop) + toolbarOffset.y),
+								window.innerHeight - row1H - 4,
+							);
 							const row2Top = row1Top + row1H + gap;
 							// Clamp using the WIDER of the two rows so neither one clips
 							// off-screen even when row 2 is wider than row 1 (e.g. scroll
@@ -2249,7 +2484,7 @@ function App() {
 							const toolbarLeft = Math.max(
 								4,
 								Math.min(
-									selection.x + selection.width / 2 - halfW,
+									selection.x + selection.width / 2 - halfW + toolbarOffset.x,
 									window.innerWidth - widestRow - 4,
 								),
 							);
@@ -2269,53 +2504,46 @@ function App() {
 							const barStyle = {
 								position: "absolute" as const,
 								left: toolbarLeft,
-								background: "rgba(255,255,255,0.95)",
-								borderRadius: 8,
-								padding: "5px 6px",
+								background: "var(--surface)",
+								borderRadius: "var(--radius-m)",
+								padding: "var(--pad)",
 								display: "flex",
-								gap: 3,
+								gap: "var(--gap)",
 								alignItems: "center" as const,
-								boxShadow: "0 2px 12px rgba(0,0,0,0.25)",
+								boxShadow: "var(--shadow-pop)",
 								zIndex: 100,
 							};
 							return (
 								<>
 									{/* Row 1: Tools + actions */}
 									<div ref={toolbarRow1Ref} style={{ ...barStyle, top: row1Top }}>
-										<ToolBtn
-											active={tool === "rect"}
-											onClick={() => handleToolChange("rect")}
-											title="Rectangle"
+										{/* Drag handle — lets the user move the toolbar when the
+										    default position is unreachable (e.g. a full-screen
+										    selection centers it under the MacBook notch). */}
+										<div
+											onMouseDown={onToolbarDragStart}
+											title="Move toolbar"
+											style={{
+												display: "flex",
+												alignItems: "center",
+												justifyContent: "center",
+												width: 16,
+												height: 32,
+												cursor: "grab",
+												color: "rgba(0,0,0,0.3)",
+												flexShrink: 0,
+											}}
 										>
-											<Square size={18} />
-										</ToolBtn>
+											<GripVertical size={14} />
+										</div>
+										{/* "Shapes" entry button — opens the options row below where
+										    the individual shapes (square/circle/arrow/line/draw) live. */}
 										<ToolBtn
-											active={tool === "oval"}
-											onClick={() => handleToolChange("oval")}
-											title="Oval"
+											active={isShapeTool}
+											onClick={() => handleToolChange(lastShape)}
+											title="Shapes"
 										>
-											<Circle size={18} />
-										</ToolBtn>
-										<ToolBtn
-											active={tool === "arrow"}
-											onClick={() => handleToolChange("arrow")}
-											title="Arrow"
-										>
-											<ArrowRight size={18} />
-										</ToolBtn>
-										<ToolBtn
-											active={tool === "line"}
-											onClick={() => handleToolChange("line")}
-											title="Line"
-										>
-											<Minus size={18} />
-										</ToolBtn>
-										<ToolBtn
-											active={tool === "draw"}
-											onClick={() => handleToolChange("draw")}
-											title="Draw"
-										>
-											<Pencil size={18} />
+											<PenLine size={18} />
 										</ToolBtn>
 										<ToolBtn
 											active={tool === "textbox"}
@@ -2329,7 +2557,7 @@ function App() {
 											onClick={() => handleToolChange("blur")}
 											title="Blur"
 										>
-											<Grid3X3 size={18} />
+											<Droplet size={18} />
 										</ToolBtn>
 										<ToolBtn
 											active={tool === "text"}
@@ -2343,9 +2571,9 @@ function App() {
 											)}
 										</ToolBtn>
 										<ToolBtn
-											active={inScrollReady}
+											active={scrollCapturing}
 											onClick={handleStartScroll}
-											title="Scroll capture"
+											title="Scroll capture — scroll the page yourself, Esc to finish"
 										>
 											<ImageDown size={18} />
 										</ToolBtn>
@@ -2374,7 +2602,7 @@ function App() {
 											style={{
 												width: 1,
 												height: 20,
-												background: "#ddd",
+												background: "var(--separator)",
 												margin: "0 1px",
 											}}
 										/>
@@ -2386,231 +2614,95 @@ function App() {
 										</ToolBtn>
 										<ToolBtn
 											onClick={cancelCapture}
-											style={{ color: "#e00" }}
+											style={{ color: "var(--red)" }}
 											title="Cancel"
 										>
 											<X size={18} />
 										</ToolBtn>
 										<ToolBtn
 											onClick={handleDone}
-											style={{ color: "#007aff" }}
+											style={{ color: "var(--accent)" }}
 											title="Copy to clipboard"
 										>
 											<Check size={18} />
 										</ToolBtn>
 									</div>
-									{/* Row 2: Options bar — separate floating bar below.
-									    Scroll-shot uses TALLER card with two internal rows
-									    (speed on top, Cancel/Start on bottom right) — all inside
-									    one white card like the translate dialog's content panel. */}
+									{/* Row 2: Options bar — separate floating bar below. */}
 									{hasRow2 && (
 										<div
 											ref={toolbarRow2Ref}
 											style={{
 												...barStyle,
 												top: row2Top,
-												padding: inScrollReady ? "8px 10px" : "4px 6px",
-												height: inScrollReady ? undefined : 36,
-												flexDirection: inScrollReady
-													? ("column" as const)
-													: ("row" as const),
-												alignItems: inScrollReady
-													? ("stretch" as const)
-													: ("center" as const),
-												gap: inScrollReady ? 8 : 3,
 											}}
 										>
-											{/* Scroll-shot speed: HORIZONTAL track with 3 vertical
-											    tick-mark stops. Row 2 holds ONLY the speed control —
-											    Cancel/Start float as separate buttons in the
-											    transparent area BELOW the toolbar (see further down). */}
-											{inScrollReady && (() => {
-												const SPEEDS: Array<{ label: string; pps: number }> = [
-													{ label: "Slow", pps: 300 },
-													{ label: "Medium", pps: 600 },
-													{ label: "Fast", pps: 1200 },
-												];
-												const activeIdx = Math.max(
-													0,
-													SPEEDS.findIndex((s) => s.pps === scrollSpeedPps),
-												);
-												const pick = (pps: number) => {
-													setScrollSpeedPps(pps);
-													localStorage.setItem("ishot-scroll-speed", String(pps));
-												};
-												const TRACK_W = 130;
-												return (
-													<>
-														{/* Inner row 1: speed track */}
-														<div
-															style={{
-																display: "flex",
-																alignItems: "center",
-																gap: 3,
-															}}
-														>
-															<span
-																style={{
-																	fontSize: 11,
-																	fontWeight: 600,
-																	color: "rgba(0,0,0,0.55)",
-																	padding: "0 6px 0 2px",
-																}}
-															>
-																Speed
-															</span>
-															<div
-																style={{
-																	position: "relative",
-																	width: TRACK_W,
-																	height: 26,
-																	display: "flex",
-																	alignItems: "center",
-																	padding: "0 6px",
-																}}
-															>
-																{/* Horizontal track */}
-																<div
-																	style={{
-																		position: "absolute",
-																		top: "50%",
-																		left: 6,
-																		right: 6,
-																		height: 2,
-																		background: "rgba(0,0,0,0.16)",
-																		borderRadius: 1,
-																		transform: "translateY(-50%)",
-																	}}
-																/>
-																{activeIdx > 0 && (
-																	<div
-																		style={{
-																			position: "absolute",
-																			top: "50%",
-																			left: 6,
-																			width: `calc(${(activeIdx / (SPEEDS.length - 1)) * 100}% - 12px)`,
-																			height: 2,
-																			background: "#007aff",
-																			borderRadius: 1,
-																			transform: "translateY(-50%)",
-																		}}
-																	/>
-																)}
-																<div
-																	style={{
-																		position: "relative",
-																		display: "flex",
-																		justifyContent: "space-between",
-																		alignItems: "center",
-																		width: "100%",
-																		zIndex: 1,
-																	}}
-																>
-																	{SPEEDS.map((s, i) => {
-																		const active = i <= activeIdx;
-																		const isCurrent = i === activeIdx;
-																		return (
-																			<div
-																				key={s.pps}
-																				onClick={() => pick(s.pps)}
-																				title={s.label}
-																				style={{
-																					width: 3,
-																					height: isCurrent ? 16 : 10,
-																					borderRadius: 1.5,
-																					background: active
-																						? "#007aff"
-																						: "rgba(0,0,0,0.32)",
-																					cursor: "pointer",
-																					boxShadow: isCurrent
-																						? "0 1px 3px rgba(0,122,255,0.5)"
-																						: "none",
-																					transition: "all 120ms ease",
-																				}}
-																			/>
-																		);
-																	})}
-																</div>
-															</div>
-														</div>
-														{/* Inner row 2: Cancel + Start, right-aligned
-														    inside the same white card. */}
-														<div
-															style={{
-																display: "flex",
-																justifyContent: "flex-end",
-																gap: 6,
-															}}
-														>
-															<button
-																onClick={handleScrollCancel}
-																style={{
-																	height: 26,
-																	padding: "0 14px",
-																	border: "none",
-																	borderRadius: 5,
-																	background: "rgba(0,0,0,0.06)",
-																	color: "rgba(0,0,0,0.78)",
-																	fontSize: 12,
-																	fontWeight: 600,
-																	cursor: "pointer",
-																	fontFamily: "inherit",
-																}}
-															>
-																Cancel
-															</button>
-															<button
-																onClick={handleScrollBegin}
-																style={{
-																	height: 26,
-																	padding: "0 16px",
-																	border: "none",
-																	borderRadius: 5,
-																	background: "#007aff",
-																	color: "#fff",
-																	fontSize: 12,
-																	fontWeight: 600,
-																	cursor: "pointer",
-																	fontFamily: "inherit",
-																}}
-															>
-																Start
-															</button>
-														</div>
-													</>
-												);
-											})()}
-											{/* Stroke width for shape tools */}
-											{!inScrollReady && isShapeTool && (
+											{/* Spacer matching row 1's drag grip (16px) so the options
+											    line up under the tool buttons instead of shifting left. */}
+											<div style={{ width: 16, flexShrink: 0 }} />
+											{/* Shape row: the shapes themselves as individual buttons,
+											    then stroke weight → sloppiness → color. */}
+											{isShapeTool && (
 												<>
+													{(
+														[
+															["rect", <Square size={18} />, "Square"],
+															["oval", <Circle size={18} />, "Circle"],
+															["arrow", <ArrowRight size={18} />, "Arrow"],
+															["line", <Minus size={18} />, "Line"],
+															["draw", <Pencil size={18} />, "Draw"],
+														] as [Tool, React.ReactNode, string][]
+													).map(([t, icon, title]) => (
+														<ToolBtn
+															key={t}
+															active={tool === t}
+															onClick={() => {
+																setLastShape(t);
+																handleToolChange(t);
+															}}
+															title={title}
+														>
+															{icon}
+														</ToolBtn>
+													))}
+													<div
+														style={{
+															width: 1,
+															height: 18,
+															background: "var(--separator)",
+															margin: "0 2px",
+														}}
+													/>
 													<DropPicker
+														compact
 														value={strokeWidth}
-														options={[1, 2, 3, 4, 6]}
-														onChange={setStrokeWidth}
+														options={[2, 4, 6, 8]}
+														onChange={(v) => {
+															setStrokeWidth(v);
+															localStorage.setItem("ishot-stroke-w", String(v));
+														}}
 														renderOption={(v) => (
 															<div
 																style={{
-																	display: "flex",
-																	alignItems: "center",
-																	gap: 6,
+																	width: 16,
+																	height: v,
+																	background: "currentColor",
+																	borderRadius: v / 2,
 																}}
-															>
-																<div
-																	style={{
-																		width: 18,
-																		height: v,
-																		background: "currentColor",
-																		borderRadius: v / 2,
-																	}}
-																/>
-															</div>
+															/>
 														)}
+													/>
+													<SloppinessPicker
+														value={sloppiness}
+														onChange={(s) => {
+															setSloppiness(s);
+															localStorage.setItem("ishot-sloppiness", String(s));
+														}}
 													/>
 													<div
 														style={{
 															width: 1,
 															height: 18,
-															background: "#ddd",
+															background: "var(--separator)",
 															margin: "0 2px",
 														}}
 													/>
@@ -2631,13 +2723,14 @@ function App() {
 														onClick={() => setFontBold(!fontBold)}
 														title="Bold"
 														style={{
-															width: 26,
-															height: 26,
+															width: 28,
+															height: 28,
+															padding: 0,
 															border: "none",
-															borderRadius: 4,
+															borderRadius: "var(--radius-s)",
 															cursor: "pointer",
-															background: fontBold ? "#007aff" : "transparent",
-															color: fontBold ? "#fff" : "#333",
+															background: fontBold ? "var(--accent)" : "transparent",
+															color: fontBold ? "#fff" : "var(--label)",
 															fontWeight: "bold",
 															fontSize: 13,
 															display: "flex",
@@ -2651,15 +2744,16 @@ function App() {
 														onClick={() => setFontUnderline(!fontUnderline)}
 														title="Underline"
 														style={{
-															width: 26,
-															height: 26,
+															width: 28,
+															height: 28,
+															padding: 0,
 															border: "none",
-															borderRadius: 4,
+															borderRadius: "var(--radius-s)",
 															cursor: "pointer",
 															background: fontUnderline
-																? "#007aff"
+																? "var(--accent)"
 																: "transparent",
-															color: fontUnderline ? "#fff" : "#333",
+															color: fontUnderline ? "#fff" : "var(--label)",
 															textDecoration: "underline",
 															fontSize: 13,
 															display: "flex",
@@ -2673,49 +2767,56 @@ function App() {
 														style={{
 															width: 1,
 															height: 18,
-															background: "#ddd",
+															background: "var(--separator)",
 															margin: "0 2px",
 														}}
 													/>
 												</>
 											)}
-											{/* Blur strength */}
+											{/* Blur strength — custom styled slider (the native range
+											    looked out of place). Label + thin track + accent fill. */}
 											{(tool === "blur" || selectedBlurAnn) && (
-												<input
-													type="range"
-													min="3"
-													max="20"
-													value={selectedBlurAnn?.blurStrength || blurStrength}
-													onChange={(e) =>
-														updateBlurStrength(Number(e.target.value))
-													}
-													style={{ width: 60, cursor: "pointer" }}
+												<div
+													style={{
+														display: "flex",
+														alignItems: "center",
+														gap: 7,
+														padding: "0 4px",
+													}}
+												>
+													<span
+														style={{
+															fontSize: 11,
+															fontWeight: 600,
+															color: "var(--label-2)",
+														}}
+													>
+														Blur
+													</span>
+													<input
+														className="ishot-range"
+														type="range"
+														min="3"
+														max="20"
+														value={selectedBlurAnn?.blurStrength || blurStrength}
+														onChange={(e) =>
+															updateBlurStrength(Number(e.target.value))
+														}
+														style={{ width: 84 }}
+													/>
+												</div>
+											)}
+											{/* Color picker — dropdown with swatch grid */}
+											{isDrawTool && (
+												<ColorPicker
+													value={strokeColor}
+													options={COLORS}
+													onChange={(color) => {
+														setStrokeColor(color);
+														localStorage.setItem("ishot-color", color);
+													}}
 												/>
 											)}
-											{/* Color picker — square swatches */}
-											{isDrawTool &&
-												COLORS.map((color) => (
-													<button
-														key={color}
-														onClick={() => {
-															setStrokeColor(color);
-															localStorage.setItem("ishot-color", color);
-														}}
-														style={{
-															width: 22,
-															height: 22,
-															borderRadius: 3,
-															background: color,
-															flexShrink: 0,
-															border:
-																color === strokeColor
-																	? "2px solid #007aff"
-																	: "1px solid rgba(0,0,0,0.12)",
-															cursor: "pointer",
-															padding: 0,
-														}}
-													/>
-												))}
 										</div>
 									)}
 
@@ -2921,7 +3022,7 @@ function App() {
 								</div>
 							</div>
 							<div
-								style={{ display: "flex", justifyContent: "flex-end", gap: 3 }}
+								style={{ display: "flex", justifyContent: "flex-end", gap: "var(--gap)" }}
 							>
 								<button
 									onClick={() => {
@@ -2932,9 +3033,9 @@ function App() {
 										height: 28,
 										padding: "0 12px",
 										border: "none",
-										borderRadius: 6,
-										background: "rgba(255,255,255,0.95)",
-										color: "#333",
+										borderRadius: "var(--radius-s)",
+										background: "var(--surface)",
+										color: "var(--label)",
 										fontSize: 12,
 										cursor: "pointer",
 										fontFamily: "inherit",
@@ -2955,8 +3056,8 @@ function App() {
 										height: 28,
 										padding: "0 14px",
 										border: "none",
-										borderRadius: 6,
-										background: "#007aff",
+										borderRadius: "var(--radius-s)",
+										background: "var(--accent)",
 										color: "#fff",
 										fontSize: 12,
 										cursor: "pointer",
@@ -2987,19 +3088,35 @@ function App() {
 									? leftX
 									: Math.max(10, selection.x);
 						const aiTop = Math.max(10, selection.y);
-						const aiMaxH = Math.max(240, window.innerHeight - aiTop - 20);
+						// Cap the card to a sane height so a long conversation scrolls
+						// inside it instead of sprawling down the whole screen. Never
+						// exceed the space available below the anchor, but also never
+						// taller than ~460px regardless of how big the display is.
+						const aiMaxH = Math.min(
+							460,
+							Math.max(240, window.innerHeight - aiTop - 20),
+						);
 						const visibleMsgs = aiMessages.filter((m) => m.role !== "system");
+						// Apply the user's drag offset, clamped so the card can't be
+						// dragged fully off-screen.
+						const aiPosLeft = Math.max(
+							8,
+							Math.min(aiLeft + aiOffset.x, window.innerWidth - AI_W - 8),
+						);
+						const aiPosTop = Math.max(
+							8,
+							Math.min(aiTop + aiOffset.y, window.innerHeight - 120),
+						);
 						return (
 							<div
 								style={{
 									position: "absolute",
-									left: aiLeft,
-									top: aiTop,
+									left: aiPosLeft,
+									top: aiPosTop,
 									width: AI_W,
 									maxHeight: aiMaxH,
 									display: "flex",
 									flexDirection: "column",
-									gap: 4,
 									zIndex: 200,
 								}}
 								onMouseDown={(e) => e.stopPropagation()}
@@ -3007,21 +3124,63 @@ function App() {
 							>
 								<div
 									style={{
-										background: "rgba(255,255,255,0.97)",
-										borderRadius: 8,
-										boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+										// Light frosted card — matches the toolbar visible in
+										// the same context. (Settings is a separate window, so
+										// it stays dark; these two share a surface.)
+										background: "var(--surface)",
+										backdropFilter: "blur(20px) saturate(180%)",
+										WebkitBackdropFilter: "blur(20px) saturate(180%)",
+										border: "1px solid var(--separator)",
+										borderRadius: "var(--radius-l)",
+										boxShadow: "var(--shadow)",
 										display: "flex",
 										flexDirection: "column",
 										overflow: "hidden",
 										maxHeight: aiMaxH - 4,
 									}}
 								>
+									{/* Header — invisible drag strip (move like the toolbar)
+									    with just a close button. No divider, title or icon. */}
+									<div
+										onMouseDown={onAiDragStart}
+										style={{
+											display: "flex",
+											justifyContent: "flex-end",
+											alignItems: "center",
+											padding: "4px 4px 0 4px",
+											cursor: "grab",
+											userSelect: "none",
+										}}
+									>
+										<button
+											onMouseDown={(e) => e.stopPropagation()}
+											onClick={closeAiPanel}
+											title="Close"
+											style={{
+												width: 24,
+												height: 24,
+												padding: 0,
+												border: "none",
+												borderRadius: 6,
+												background: "transparent",
+												color: "var(--label-2)",
+												cursor: "pointer",
+												display: "flex",
+												alignItems: "center",
+												justifyContent: "center",
+											}}
+										>
+											<X size={15} />
+										</button>
+									</div>
 									<div
 										ref={aiScrollRef}
 										style={{
+											// flex:1 + minHeight:0 is what lets this region SCROLL
+											// inside the height-capped card instead of pushing the
+											// card taller as messages accumulate.
 											flex: 1,
-											minHeight: 80,
-											maxHeight: aiMaxH - 220,
+											minHeight: 0,
 											overflowY: "auto",
 											padding: "10px 10px",
 											display: "flex",
@@ -3033,7 +3192,7 @@ function App() {
 											<div
 												style={{
 													fontSize: 12,
-													color: "rgba(0,0,0,0.45)",
+													color: "var(--label-2)",
 													textAlign: "center",
 													padding: "16px 8px",
 												}}
@@ -3041,115 +3200,128 @@ function App() {
 												Ask anything about the captured text.
 											</div>
 										)}
-										{visibleMsgs.map((m, i) => (
-											<div
-												key={i}
-												style={{
-													alignSelf:
-														m.role === "user" ? "flex-end" : "flex-start",
-													maxWidth: "88%",
-													background:
-														m.role === "user"
-															? "#007aff"
-															: m.error
-																? "rgba(255,59,48,0.08)"
-																: "rgba(0,0,0,0.05)",
-													color:
-														m.role === "user"
-															? "#fff"
-															: m.error
-																? "#c0271c"
-																: "#1a1a1a",
-													padding: "6px 10px",
-													borderRadius: 10,
-													fontSize: 13,
-													lineHeight: 1.5,
-													wordBreak: "break-word",
-													userSelect: "text",
-												}}
-												className={
-													m.role === "assistant" ? "ai-md" : undefined
-												}
-											>
-												{m.role === "assistant" ? (
-													m.content ? (
+										{visibleMsgs.map((m, i) => {
+											// Thinking state (assistant, no content yet) renders as
+											// bare shimmer text — NO bubble box around it.
+											const isThinking = m.role === "assistant" && !m.content;
+											if (isThinking) {
+												return (
+													<div
+														key={i}
+														style={{
+															alignSelf: "flex-start",
+															padding: "2px 4px",
+														}}
+													>
+														<ThinkingLabel />
+													</div>
+												);
+											}
+											return (
+												<div
+													key={i}
+													style={{
+														alignSelf:
+															m.role === "user" ? "flex-end" : "flex-start",
+														maxWidth: "88%",
+														background:
+															m.role === "user"
+																? "var(--accent)"
+																: m.error
+																	? "rgba(255,59,48,0.12)"
+																	: "var(--fill)",
+														color:
+															m.role === "user"
+																? "#fff"
+																: m.error
+																	? "#c0271c"
+																	: "var(--label)",
+														padding: "6px 10px",
+														borderRadius: 12,
+														fontSize: 13,
+														lineHeight: 1.5,
+														wordBreak: "break-word",
+														userSelect: "text",
+													}}
+													className={
+														m.role === "assistant" ? "ai-md ai-msg" : "ai-msg"
+													}
+												>
+													{m.role === "assistant" ? (
 														<ReactMarkdown remarkPlugins={[remarkGfm]}>
 															{m.content}
 														</ReactMarkdown>
 													) : (
-														<span style={{ opacity: 0.5 }}>…</span>
-													)
-												) : (
-													m.content
-												)}
-											</div>
-										))}
+														m.content
+													)}
+												</div>
+											);
+										})}
 									</div>
 
 									<div
 										style={{
-											borderTop: "1px solid rgba(0,0,0,0.08)",
 											padding: 8,
-											display: "flex",
-											alignItems: "flex-end",
-											gap: 6,
+											flexShrink: 0,
 										}}
 									>
-										<textarea
-											value={aiInput}
-											onChange={(e) => setAiInput(e.target.value)}
-											onKeyDown={(e) => {
-												if (e.key === "Enter" && !e.shiftKey) {
-													e.preventDefault();
-													sendAiPrompt();
-												}
-											}}
-											rows={1}
-											placeholder="Ask about this…"
-											disabled={aiLoading || aiStreaming}
-											style={{
-												flex: 1,
-												resize: "none",
-												border: "1px solid rgba(0,0,0,0.15)",
-												borderRadius: 6,
-												padding: "6px 8px",
-												fontSize: 13,
-												fontFamily: "inherit",
-												lineHeight: 1.4,
-												maxHeight: 110,
-												outline: "none",
-												background: "#fff",
-												color: "#1a1a1a",
-											}}
-										/>
-										<button
-											onClick={sendAiPrompt}
-											disabled={
-												aiStreaming || aiLoading || !aiInput.trim()
-											}
-											style={{
-												height: 30,
-												padding: "0 12px",
-												border: "none",
-												borderRadius: 6,
-												background:
-													aiStreaming || aiLoading || !aiInput.trim()
-														? "rgba(0,0,0,0.15)"
-														: "#007aff",
-												color: "#fff",
-												fontSize: 12,
-												fontFamily: "inherit",
-												cursor:
-													aiStreaming || aiLoading || !aiInput.trim()
-														? "default"
-														: "pointer",
-											}}
-										>
-											{aiStreaming ? "…" : "Send"}
-										</button>
+										{/* Messages-style capsule: rounded field, send button inside. */}
+										<div className="ai-input-wrap">
+												<textarea
+													className="ai-input"
+													value={aiInput}
+													onChange={(e) => setAiInput(e.target.value)}
+													onKeyDown={(e) => {
+														if (e.key === "Enter" && !e.shiftKey) {
+															e.preventDefault();
+															sendAiPrompt();
+														}
+													}}
+													rows={1}
+													placeholder="Ask about this…"
+													disabled={aiLoading}
+													style={{
+														flex: 1,
+														resize: "none",
+														border: "none",
+														padding: "5px 0",
+														fontSize: 13,
+														fontFamily: "inherit",
+														lineHeight: 1.4,
+														maxHeight: 110,
+														outline: "none",
+														background: "transparent",
+														color: "var(--label)",
+													}}
+												/>
+												{/* One circular accent button, two states
+												    (Messages-style): arrow-up = send, square =
+												    stop. Same shape, same color. */}
+												<button
+													className="ai-send"
+													title={aiStreaming ? "Stop" : "Send"}
+													onClick={() => {
+														if (aiStreaming) {
+															aiAbortRef.current?.();
+															setAiStreaming(false);
+														} else {
+															sendAiPrompt();
+														}
+													}}
+													disabled={
+														!aiStreaming && (aiLoading || !aiInput.trim())
+													}
+												>
+													{aiStreaming ? (
+														<Square size={9} fill="currentColor" />
+													) : (
+														<ArrowUp size={14} strokeWidth={2.5} />
+													)}
+												</button>
+											</div>
+										</div>
 									</div>
 								</div>
-							</div>
 						);
 					})()}
 
@@ -3160,18 +3332,66 @@ function App() {
 	);
 }
 
+// Whimsical "thinking" verbs in the spirit of Claude Code's spinner — shown
+// (one at a time, cycling) in place of a boring "Thinking…" while we wait for
+// the first streamed token. No bubble around them; just the shimmer text.
+const THINKING_WORDS = [
+	"Thinking",
+	"Pondering",
+	"Germinating",
+	"Cogitating",
+	"Ruminating",
+	"Noodling",
+	"Percolating",
+	"Conjuring",
+	"Marinating",
+	"Finagling",
+	"Puzzling",
+	"Musing",
+	"Scheming",
+	"Churning",
+	"Brewing",
+	"Simmering",
+];
+function ThinkingLabel() {
+	const [idx, setIdx] = useState(() =>
+		Math.floor(Math.random() * THINKING_WORDS.length),
+	);
+	useEffect(() => {
+		// Every 5s pick a RANDOM next word (never repeating the current one), so
+		// the order varies each time instead of marching through the list.
+		const t = window.setInterval(() => {
+			setIdx((prev) => {
+				if (THINKING_WORDS.length < 2) return prev;
+				let next = prev;
+				while (next === prev)
+					next = Math.floor(Math.random() * THINKING_WORDS.length);
+				return next;
+			});
+		}, 5000);
+		return () => window.clearInterval(t);
+	}, []);
+	// key remounts the span each cycle so the fade-in (ishot-msg-in) replays.
+	return (
+		<span key={idx} className="ai-thinking">
+			{THINKING_WORDS[idx]}…
+		</span>
+	);
+}
+
 function ToolBtn({ children, active, onClick, style, title }: any) {
 	return (
 		<button
 			onClick={onClick}
 			title={title}
 			style={{
-				width: 32,
-				height: 32,
+				width: "var(--ctrl)",
+				height: "var(--ctrl)",
+				padding: 0,
 				border: "none",
-				borderRadius: 5,
-				background: active ? "#007aff" : "transparent",
-				color: active ? "#fff" : "#333",
+				borderRadius: "var(--radius-s)",
+				background: active ? "var(--accent)" : "transparent",
+				color: active ? "#fff" : "var(--label)",
 				cursor: "pointer",
 				fontSize: 14,
 				display: "flex",
@@ -3190,11 +3410,14 @@ function DropPicker({
 	options,
 	onChange,
 	renderOption,
+	compact,
 }: {
 	value: number;
 	options: number[];
 	onChange: (v: number) => void;
 	renderOption?: (v: number) => React.ReactNode;
+	/** Icon-only 32×28 trigger + horizontal popup row — matches ShapePicker/ColorPicker. */
+	compact?: boolean;
 }) {
 	const [open, setOpen] = useState(false);
 	const ref = useRef<HTMLDivElement>(null);
@@ -3213,16 +3436,18 @@ function DropPicker({
 				onClick={() => setOpen(!open)}
 				style={{
 					height: 28,
-					minWidth: 40,
-					borderRadius: 5,
+					width: compact ? 32 : undefined,
+					minWidth: compact ? undefined : 40,
+					borderRadius: "var(--radius-s)",
 					border: "none",
 					fontSize: 12,
-					padding: "0 8px",
+					padding: compact ? 0 : "0 8px",
 					cursor: "pointer",
-					background: open ? "#007aff" : "rgba(0,0,0,0.06)",
-					color: open ? "#fff" : "#333",
+					background: open ? "var(--accent)" : "var(--hover)",
+					color: open ? "#fff" : "var(--label)",
 					display: "flex",
 					alignItems: "center",
+					justifyContent: compact ? "center" : "flex-start",
 					gap: 4,
 					fontFamily: "inherit",
 				}}
@@ -3235,16 +3460,16 @@ function DropPicker({
 						position: "absolute",
 						top: "100%",
 						left: 0,
-						marginTop: 4,
-						background: "rgba(255,255,255,0.97)",
-						borderRadius: 6,
-						padding: 3,
-						boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
+						marginTop: 10,
+						background: "var(--surface)",
+						borderRadius: "var(--radius-m)",
+						padding: "var(--pad)",
+						boxShadow: "var(--shadow-pop)",
 						zIndex: 200,
 						display: "flex",
-						flexDirection: "column",
-						gap: 1,
-						minWidth: ref.current?.offsetWidth || 40,
+						flexDirection: compact ? "row" : "column",
+						gap: "var(--gap)",
+						minWidth: compact ? undefined : ref.current?.offsetWidth || 40,
 					}}
 				>
 					{options.map((v) => (
@@ -3255,22 +3480,226 @@ function DropPicker({
 								setOpen(false);
 							}}
 							style={{
-								height: 26,
+								height: 28,
+								width: compact ? 28 : undefined,
 								border: "none",
-								borderRadius: 4,
+								borderRadius: "var(--radius-s)",
 								fontSize: 12,
-								padding: "0 8px",
-								background: v === value ? "#007aff" : "transparent",
-								color: v === value ? "#fff" : "#333",
+								padding: compact ? 0 : "0 8px",
+								background: v === value ? "var(--accent)" : "transparent",
+								color: v === value ? "#fff" : "var(--label)",
 								cursor: "pointer",
 								fontFamily: "inherit",
 								display: "flex",
 								alignItems: "center",
+								justifyContent: compact ? "center" : "flex-start",
 								whiteSpace: "nowrap",
 							}}
 						>
 							{renderOption ? renderOption(v) : `${v}px`}
 						</button>
+					))}
+				</div>
+			)}
+		</div>
+	);
+}
+
+/**
+ * Sloppiness selector (Excalidraw "hand-drawn" levels): smooth / artist /
+ * cartoonist. Each option previews the roughness as a little squiggle.
+ */
+function SloppinessPicker({
+	value,
+	onChange,
+}: {
+	value: Sloppiness;
+	onChange: (v: Sloppiness) => void;
+}) {
+	// Squiggle paths approximating each roughness level (viewBox 0 0 22 16).
+	const PATHS: Record<Sloppiness, string> = {
+		0: "M3 9 C 7 3, 10 3, 13 9 S 18 13, 19 7",
+		1: "M3 9 q 2 -6 4 -1 q 2 5 4 -1 q 2 -5 4 1 q 1 3 3 0",
+		2: "M3 8 l2 -4 l1 6 l3 -6 l1 5 l3 -5 l2 5 l3 -4",
+	};
+	const OPTIONS: { value: Sloppiness; title: string }[] = [
+		{ value: 0, title: "Smooth" },
+		{ value: 1, title: "Artist" },
+		{ value: 2, title: "Cartoonist" },
+	];
+	const [open, setOpen] = useState(false);
+	const ref = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		if (!open) return;
+		const close = (e: MouseEvent) => {
+			if (ref.current && !ref.current.contains(e.target as Node))
+				setOpen(false);
+		};
+		document.addEventListener("mousedown", close);
+		return () => document.removeEventListener("mousedown", close);
+	}, [open]);
+	const squiggle = (v: Sloppiness, on: boolean) => (
+		<svg width="20" height="15" viewBox="0 0 22 16" fill="none">
+			<path
+				d={PATHS[v]}
+				stroke={on ? "#fff" : "var(--label)"}
+				strokeWidth="1.8"
+				strokeLinecap="round"
+				strokeLinejoin="round"
+			/>
+		</svg>
+	);
+	return (
+		<div ref={ref} style={{ position: "relative" }}>
+			<button
+				onClick={() => setOpen(!open)}
+				title="Sloppiness"
+				style={{
+					width: 32,
+					height: 28,
+					padding: 0,
+					borderRadius: "var(--radius-s)",
+					border: "none",
+					cursor: "pointer",
+					background: open ? "var(--accent)" : "var(--hover)",
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "center",
+				}}
+			>
+				{squiggle(value, open)}
+			</button>
+			{open && (
+				<div
+					style={{
+						position: "absolute",
+						top: "100%",
+						left: 0,
+						marginTop: 10,
+						background: "var(--surface)",
+						borderRadius: "var(--radius-m)",
+						padding: "var(--pad)",
+						boxShadow: "var(--shadow-pop)",
+						zIndex: 200,
+						display: "flex",
+						gap: "var(--gap)",
+					}}
+				>
+					{OPTIONS.map((opt) => (
+						<button
+							key={opt.value}
+							onClick={() => {
+								onChange(opt.value);
+								setOpen(false);
+							}}
+							title={opt.title}
+							style={{
+								width: 32,
+								height: 28,
+								padding: 0,
+								border: "none",
+								borderRadius: "var(--radius-s)",
+								background:
+									opt.value === value ? "var(--accent)" : "transparent",
+								cursor: "pointer",
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+							}}
+						>
+							{squiggle(opt.value, opt.value === value)}
+						</button>
+					))}
+				</div>
+			)}
+		</div>
+	);
+}
+
+/**
+ * Color selector: trigger shows the current swatch; the popover holds a
+ * 4-column swatch grid. Replaces the inline strip of 8 swatches so the
+ * options row stays compact (shape / stroke / color, three dropdowns).
+ */
+function ColorPicker({
+	value,
+	options,
+	onChange,
+}: {
+	value: string;
+	options: string[];
+	onChange: (v: string) => void;
+}) {
+	const [open, setOpen] = useState(false);
+	const ref = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		if (!open) return;
+		const close = (e: MouseEvent) => {
+			if (ref.current && !ref.current.contains(e.target as Node))
+				setOpen(false);
+		};
+		document.addEventListener("mousedown", close);
+		return () => document.removeEventListener("mousedown", close);
+	}, [open]);
+	return (
+		<div ref={ref} style={{ position: "relative" }}>
+			<button
+				onClick={() => setOpen(!open)}
+				title="Color"
+				style={{
+					width: 32,
+					height: 28,
+					padding: 0,
+					borderRadius: "var(--radius-s)",
+					border: "none",
+					cursor: "pointer",
+					background: open ? "var(--accent)" : "var(--hover)",
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "center",
+				}}
+			>
+				{/* Palette icon tinted with the current color — reads as "color"
+				    and still shows the active swatch via the tint. */}
+				<Palette size={17} color={open ? "#fff" : value} />
+			</button>
+			{open && (
+				<div
+					style={{
+						position: "absolute",
+						top: "100%",
+						left: 0,
+						marginTop: 10,
+						background: "var(--surface)",
+						borderRadius: "var(--radius-m)",
+						padding: "var(--pad)",
+						boxShadow: "var(--shadow-pop)",
+						zIndex: 200,
+						display: "grid",
+						gridTemplateColumns: "repeat(4, 24px)",
+						gap: "var(--gap)",
+					}}
+				>
+					{options.map((color) => (
+						<button
+							key={color}
+							onClick={() => {
+								onChange(color);
+								setOpen(false);
+							}}
+							style={{
+								width: 24,
+								height: 24,
+								borderRadius: 5,
+								background: color,
+								border:
+									color === value
+										? "2px solid var(--accent)"
+										: "1px solid rgba(0,0,0,0.12)",
+								cursor: "pointer",
+								padding: 0,
+							}}
+						/>
 					))}
 				</div>
 			)}

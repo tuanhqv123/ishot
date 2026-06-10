@@ -163,8 +163,10 @@ pub async fn finalize_scroll_to_clipboard(
     // worth of content missing from the output the user just pasted).
     //
     // The capture loop's final sync happens AFTER it exits the inner loop.
-    // We poll up to ~250 ms (well within the user's click→paste timing).
-    let deadline = Instant::now() + Duration::from_millis(250);
+    // We poll until `is_capturing` flips (the loop's stop handler syncs the
+    // final image first). Deadline must outlast the manual-capture idle sleep
+    // (250 ms) plus one capture+NCC cycle, or we'd grab a stale image.
+    let deadline = Instant::now() + Duration::from_millis(600);
     while Instant::now() < deadline {
         if !state.lock().unwrap().is_capturing {
             break;

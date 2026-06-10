@@ -15,7 +15,37 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-/* AI chat assistant message markdown */
+/* ── Design tokens ──────────────────────────────────────────────────────
+   Single source of truth for the floating UI that sits over the screenshot
+   (toolbar, pickers, chat dialog). macOS system values, light appearance —
+   every surface here shows TOGETHER, so they share one palette/geometry. */
+:root {
+  /* macOS system colors (light appearance) */
+  --accent: #007aff;          /* systemBlue */
+  --accent-strong: #0a84ff;
+  --red: #ff3b30;             /* systemRed */
+
+  /* Surfaces & content (light) */
+  --surface: rgba(255, 255, 255, 0.97);
+  --hover: rgba(0, 0, 0, 0.06);
+  --fill: rgba(0, 0, 0, 0.05);   /* assistant bubble, input field */
+  --label: rgba(0, 0, 0, 0.85);
+  --label-2: rgba(0, 0, 0, 0.5);
+  --label-3: rgba(0, 0, 0, 0.3);
+  --separator: rgba(0, 0, 0, 0.1);
+
+  /* Geometry */
+  --radius-l: 12px;   /* cards / dialogs */
+  --radius-m: 8px;    /* bars / popups */
+  --radius-s: 6px;    /* buttons / items */
+  --gap: 4px;         /* spacing between controls AND between popup items */
+  --pad: 6px;         /* inner padding of bars and popups */
+  --ctrl: 32px;       /* tool button / picker trigger size */
+  --shadow: 0 4px 20px rgba(0, 0, 0, 0.18);
+  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.22);
+}
+
+/* ── AI chat message markdown (light) ──────────────────────────────────── */
 .ai-md > *:first-child { margin-top: 0; }
 .ai-md > *:last-child { margin-bottom: 0; }
 .ai-md p { margin: 4px 0; }
@@ -23,13 +53,13 @@ body {
 .ai-md li { margin: 2px 0; }
 .ai-md code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  background: rgba(0,0,0,0.07);
+  background: rgba(0, 0, 0, 0.07);
   padding: 1px 5px;
   border-radius: 4px;
   font-size: 0.92em;
 }
 .ai-md pre {
-  background: rgba(0,0,0,0.07);
+  background: rgba(0, 0, 0, 0.06);
   padding: 8px 10px;
   border-radius: 6px;
   overflow-x: auto;
@@ -44,21 +74,106 @@ body {
 .ai-md blockquote {
   margin: 6px 0;
   padding: 2px 10px;
-  border-left: 3px solid rgba(0,0,0,0.15);
-  color: rgba(0,0,0,0.7);
+  border-left: 3px solid var(--separator);
+  color: var(--label-2);
 }
-.ai-md a { color: #007aff; text-decoration: underline; }
-.ai-md table {
-  border-collapse: collapse;
-  margin: 6px 0;
-  font-size: 12px;
+.ai-md a { color: var(--accent); text-decoration: underline; }
+.ai-md table { border-collapse: collapse; margin: 6px 0; font-size: 12px; }
+.ai-md th, .ai-md td { border: 1px solid var(--separator); padding: 4px 8px; }
+.ai-md hr { border: none; border-top: 1px solid var(--separator); margin: 8px 0; }
+
+.ai-input::placeholder { color: var(--label-3); }
+
+/* ── Input capsule (Messages-style) ─────────────────────────────────────
+   Rounded field with the send button INSIDE, vertically centered. */
+.ai-input-wrap {
+  display: flex;
+  align-items: center;          /* center the send button against the text */
+  gap: 6px;
+  border-radius: 19px;
+  padding: 4px 4px 4px 12px;
+  background: var(--fill);
 }
-.ai-md th, .ai-md td {
-  border: 1px solid rgba(0,0,0,0.15);
-  padding: 4px 8px;
+
+/* ── Thinking text — Claude-style cycling word + gentle wave shimmer ─────
+   No bubble, just text. A soft highlight band drifts slowly across the
+   word; each new word fades in. Slow + calm. */
+.ai-thinking {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  background: linear-gradient(
+    100deg,
+    rgba(0, 0, 0, 0.22) 40%,
+    rgba(0, 0, 0, 0.58) 50%,
+    rgba(0, 0, 0, 0.22) 60%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation:
+    ishot-wave 4s ease-in-out infinite,
+    ishot-fade 600ms ease both;   /* pure fade on word change — no slide */
 }
-.ai-md hr {
+@keyframes ishot-wave {
+  0% { background-position: 150% 0; }
+  100% { background-position: -50% 0; }
+}
+@keyframes ishot-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Message entrance — subtle rise + fade, matching macOS sheet feel. */
+.ai-msg { animation: ishot-msg-in 240ms ease both; }
+@keyframes ishot-msg-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ── Circular send button INSIDE the capsule ────────────────────────────
+   One shape, one accent color; glyph signals state (↑ send / ■ stop). */
+.ai-send {
+  width: 26px;
+  height: 26px;
+  padding: 0;
   border: none;
-  border-top: 1px solid rgba(0,0,0,0.12);
-  margin: 8px 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 200ms ease, opacity 200ms ease, transform 120ms ease;
 }
+.ai-send:hover { background: var(--accent-strong); }
+.ai-send:active { transform: scale(0.92); }
+.ai-send:disabled { opacity: 0.35; cursor: default; background: var(--accent); }
+
+/* ── Custom slider (blur strength) — replaces the ugly native range ───── */
+.ishot-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.14);
+  cursor: pointer;
+  outline: none;
+}
+.ishot-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: transform 100ms ease;
+}
+.ishot-range::-webkit-slider-thumb:active { transform: scale(1.15); }

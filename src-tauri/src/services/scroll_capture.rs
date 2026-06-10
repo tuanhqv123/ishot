@@ -33,10 +33,12 @@ const CAPTURE_INTERVAL_DEFAULT_MS: u64 = 250;
 // they're "done". A 5s settlement was too aggressive — the user would pause
 // to read, the panel would auto-finalize, and they'd lose their session.
 //
-// 12s settlement + 8s grace = roughly "if you haven't touched the trackpad in
-// 12 seconds AND you've been at it more than 8 seconds, we'll wrap up for you."
-// The user can always click Done immediately to stop sooner.
-const SETTLEMENT_DELAY_MS: u64 = 12000;
+// Esc is the PRIMARY finish (the panel says so); auto-stop is just a safety
+// net for when the user wanders off without pressing it. So bias it LONG —
+// 20s idle + 8s grace. A 12s settlement still cut people off mid-read on
+// long articles; 20s is comfortably past any "pause to read" pause while
+// still wrapping up if they truly left.
+const SETTLEMENT_DELAY_MS: u64 = 20000;
 const GRACE_PERIOD_MS: u64 = 8000;
 
 // Minimum offset threshold (in pixels) to consider as scroll
@@ -579,6 +581,7 @@ impl ScrollCaptureService {
             let mut s = state.lock().unwrap();
             s.is_capturing = true;
             s.should_stop.store(false, Ordering::SeqCst);
+            s.externally_finalized.store(false, Ordering::SeqCst);
             s.stitched_image = None;
             s.total_height = 0;
             s.frame_count = 0;
@@ -612,7 +615,7 @@ impl ScrollCaptureService {
 
         loop {
             if state.lock().unwrap().should_stop.load(Ordering::SeqCst) {
-                return Ok(None);
+                return Self::stop_requested(stitched, frame_count, state, app_handle);
             }
 
             // Auto-stop: after grace period, if no scroll for settlement delay
@@ -650,8 +653,18 @@ impl ScrollCaptureService {
             let min_offset = (curr_image.height() as f64 * MIN_OFFSET_RATIO)
                 .max(MIN_OFFSET_ABSOLUTE);
 
-            if offset_result.confidence < 0.7 || (offset_result.offset as f64) < min_offset {
+            if offset_result.confidence < 0.7 {
+                // Ambiguous match — can't align reliably. Advance the baseline
+                // and wait for a clearer frame.
                 prev_image = curr_image;
+                continue;
+            }
+            if (offset_result.offset as f64) < min_offset {
+                // Real but tiny scroll (slow drag, < ~20px). Do NOT advance the
+                // baseline: hold `prev_image` so the offset ACCUMULATES across
+                // idle polls until it crosses the threshold, then we stitch it
+                // in one clean step. The old code advanced prev here, which
+                // silently dropped everything the user scrolled slowly past.
                 continue;
             }
 
@@ -659,9 +672,10 @@ impl ScrollCaptureService {
 
             // ===== ACTIVE PHASE: stitch while scrolling =====
             if let Err(e) = Self::stitch_frame(&mut stitched, &curr_image, &offset_result) {
-                eprintln!("[scroll] stitch failed: {}", e);
-                prev_image = curr_image;
-                continue;
+                // Only error source is the MAX_SCROLL_HEIGHT cap — finish the
+                // session with what we have instead of looping on the error.
+                eprintln!("[scroll] stitch stopped: {}", e);
+                return Self::finalize(stitched, state, app_handle);
             }
 
             prev_image = curr_image.clone();
@@ -683,9 +697,38 @@ impl ScrollCaptureService {
             let mut active_no_change = 0u32;
             let mut consecutive_too_fast = 0u32;
             let mut last_overlap_ratio: f32 = 1.0;
+            // Roll-back guard for the FINAL frame. When a scroll decelerates or
+            // the page rubber-band-bounces at the end, the very last stitched
+            // frame is captured mid-animation and aligns with marginal
+            // confidence — leaving a visibly wrong strip at the bottom ("frame
+            // cuối ghép sai"). We remember the stitched height + confidence
+            // BEFORE the latest stitch; if the scroll then stops and that last
+            // stitch was weak (conf < 0.9), we crop it back off. Cropping (not
+            // cloning) keeps this cheap and only runs once, on stop.
+            let mut pre_stitch_height: Option<u32> = None;
+            let mut last_stitch_conf: f64 = 1.0;
+            let rollback_weak_tail = |stitched: &mut image::RgbaImage,
+                                      h: Option<u32>,
+                                      conf: f64| {
+                if conf < 0.9 {
+                    if let Some(h) = h {
+                        if h < stitched.height() {
+                            *stitched = image::imageops::crop_imm(
+                                stitched, 0, 0, stitched.width(), h,
+                            )
+                            .to_image();
+                            println!(
+                                "[scroll] dropped uncertain final frame (conf {:.2}) → {}px",
+                                conf, h
+                            );
+                        }
+                    }
+                }
+            };
             loop {
                 if state.lock().unwrap().should_stop.load(Ordering::SeqCst) {
-                    return Ok(None);
+                    rollback_weak_tail(&mut stitched, pre_stitch_height, last_stitch_conf);
+                    return Self::stop_requested(stitched, frame_count, state, app_handle);
                 }
 
                 let sleep_ms = if last_overlap_ratio < 0.40 {
@@ -707,6 +750,7 @@ impl ScrollCaptureService {
                     active_no_change += 1;
                     if active_no_change >= 2 {
                         println!("[scroll] scroll stopped ({} frames no change)", active_no_change);
+                        rollback_weak_tail(&mut stitched, pre_stitch_height, last_stitch_conf);
                         prev_image = next_image;
                         break;
                     }
@@ -730,6 +774,7 @@ impl ScrollCaptureService {
                     active_no_change += 1;
                     if active_no_change >= 2 {
                         println!("[scroll] scroll stopped (offset too small)");
+                        rollback_weak_tail(&mut stitched, pre_stitch_height, last_stitch_conf);
                         prev_image = next_image;
                         break;
                     }
@@ -741,11 +786,16 @@ impl ScrollCaptureService {
                 // Record overlap ratio for the next sleep decision.
                 last_overlap_ratio = (offset_result.offset as f32) / (next_image.height() as f32);
 
+                // Remember state BEFORE this stitch so we can drop it if the
+                // scroll turns out to stop right after (weak final frame).
+                pre_stitch_height = Some(stitched.height());
+                last_stitch_conf = offset_result.confidence;
+
                 // Still scrolling - stitch
                 if let Err(e) = Self::stitch_frame(&mut stitched, &next_image, &offset_result) {
-                    eprintln!("[scroll] stitch failed: {}", e);
-                    prev_image = next_image;
-                    break;
+                    // Max-height cap reached — finish with what we have.
+                    eprintln!("[scroll] stitch stopped: {}", e);
+                    return Self::finalize(stitched, state, app_handle);
                 }
 
                 last_scroll_time = SystemTime::now();
@@ -1215,6 +1265,40 @@ impl ScrollCaptureService {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
+    }
+
+    /// Handle a `should_stop` signal observed by the manual-capture loop.
+    ///
+    /// Two distinct reasons the flag gets set:
+    ///   - Esc / Done → `finalize_scroll_to_clipboard` set `externally_finalized`
+    ///     and is now polling `is_capturing`. It will take `state.stitched_image`,
+    ///     which without a final sync lags the live `stitched` by up to one
+    ///     STATE_SYNC_INTERVAL (300 ms) — the last stitches would be missing
+    ///     from what lands on the clipboard. Sync the freshest image, then run
+    ///     the normal finalize (it skips the clipboard write on this path).
+    ///   - Cancel → state image was already cleared; just mark not-capturing.
+    fn stop_requested(
+        stitched: image::RgbaImage,
+        frame_count: u32,
+        state: Arc<Mutex<ScrollCaptureState>>,
+        app_handle: tauri::AppHandle,
+    ) -> Result<Option<(Vec<u8>, u32, u32)>> {
+        let externally = state
+            .lock()
+            .unwrap()
+            .externally_finalized
+            .load(Ordering::SeqCst);
+        if externally {
+            {
+                let mut s = state.lock().unwrap();
+                s.stitched_image = Some(stitched.clone());
+                s.total_height = stitched.height();
+                s.frame_count = frame_count;
+            }
+            return Self::finalize(stitched, state, app_handle);
+        }
+        state.lock().unwrap().is_capturing = false;
+        Ok(None)
     }
 
     /// Auto-stop finalization. Copies the stitched image straight to the

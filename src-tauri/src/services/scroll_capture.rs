@@ -24,7 +24,12 @@ const MAX_SCROLL_HEIGHT: u32 = 20000;
 
 // Capture interval range (adaptive)
 const CAPTURE_INTERVAL_FAST_MS: u64 = 100;
-const CAPTURE_INTERVAL_DEFAULT_MS: u64 = 250;
+// Idle poll: how often we look for the START of a scroll. Must be SHORT —
+// at 250ms a medium-fast scroll moved most of a viewport before we noticed,
+// so the first frame had little overlap and the chunk got dropped (the "mất
+// nhiều phần" the user saw). 60ms catches the scroll start with overlap
+// intact; capturing a static screen at ~16fps is cheap.
+const CAPTURE_INTERVAL_DEFAULT_MS: u64 = 60;
 
 // Auto-stop kicks in after the user appears done. Numbers tuned so a typical
 // "pause to read what you just scrolled past" doesn't trigger it.
@@ -46,10 +51,14 @@ const GRACE_PERIOD_MS: u64 = 8000;
 const MIN_OFFSET_RATIO: f64 = 0.05;
 const MIN_OFFSET_ABSOLUTE: f64 = 20.0;
 
-// Throttle state.stitched_image sync + UI thumbnail emit to ~3Hz.
-// Cloning the stitched image is O(width × height × 4 bytes) — for tall
-// captures this is tens of MB per clone, so we don't do it on every frame.
-const STATE_SYNC_INTERVAL_MS: u128 = 300;
+// The preview thumbnail is CHEAP (crop the bottom slice + resize small), so
+// emit it often → the side preview tracks the live scroll instead of lagging.
+const THUMB_INTERVAL_MS: u128 = 90;
+// Cloning the WHOLE stitched image into shared state is O(width × height × 4)
+// — tens of MB for tall captures, the main thing that made the capture thread
+// fall behind the scroll. The final image is synced on stop anyway, so we only
+// do this rarely (a stale-state safety net), NOT on the preview cadence.
+const STATE_SYNC_INTERVAL_MS: u128 = 1200;
 
 // Preview thumbnail target width (matches scroll-panel.html .preview width).
 const PREVIEW_THUMB_WIDTH_PX: u32 = 216;
@@ -258,13 +267,28 @@ impl ScrollCaptureService {
     fn detect_offset_ncc(
         prev: &image::RgbaImage,
         curr: &image::RgbaImage,
+        hint: Option<u32>,
     ) -> OffsetResult {
         let width = prev.width().min(curr.width());
         let prev_h = prev.height();
         let curr_h = curr.height();
 
-        let min_offset = (prev_h as f64 * 0.03) as u32;
-        let max_offset = (prev_h as f64 * 0.95) as u32;
+        let full_min = (prev_h as f64 * 0.03) as u32;
+        let full_max = (prev_h as f64 * 0.95) as u32;
+        // PERFORMANCE: the full-range search is O(prev_h) candidates and was the
+        // dominant cost per capture cycle (~20-50ms), which made the capture
+        // fall behind a fast scroll. During CONTINUOUS scrolling the offset
+        // barely changes frame-to-frame, so when the caller passes the last
+        // offset as a `hint` we search only a NARROW window around it (±50%,
+        // min ±60px) — wide enough to absorb accel/decel. A low-confidence
+        // result makes the caller retry with `None` (full range) to re-acquire.
+        let (min_offset, max_offset) = match hint {
+            Some(h) if h > 0 => {
+                let w = (h / 2).max(60);
+                (full_min.max(h.saturating_sub(w)), full_max.min(h + w))
+            }
+            _ => (full_min, full_max),
+        };
 
         let x_step = 3usize;
         let x_count = width as usize / x_step;
@@ -416,24 +440,9 @@ impl ScrollCaptureService {
         let new_w = new_frame.width() as usize;
         let new_bpr = new_w * 4;
 
-        // Copy base entirely (base rows 0..base.height())
-        for y in 0..base.height() {
-            let src_off = y as usize * base_bpr;
-            let dst_off = y as usize * bytes_per_row;
-            let copy_len = base_bpr.min(bytes_per_row).min(composite.len() - dst_off).min(base_raw.len() - src_off);
-            composite[dst_off..dst_off + copy_len].copy_from_slice(&base_raw[src_off..src_off + copy_len]);
-        }
-
-        // Find best cut row within the overlap zone.
-        //
-        // Previously this searched only the last 8 rows of overlap, which often
-        // missed the truly best match — producing visible seams when the detected
-        // offset was off by a few pixels (e.g., sub-pixel scroll rounding).
-        //
-        // Now we search the bottom HALF of the overlap zone. That's wide enough to
-        // find a clean match even with a few pixels of offset error, but biased
-        // toward the seam region (the new-content boundary). Cost is O(rows) SAD
-        // comparisons — ~30k pixel ops total at typical sizes, still <1ms.
+        // ── Find the best seam row in the overlap (SAD-minimum) ──
+        // Search the bottom half of the overlap so a few px of offset error
+        // still lands on a clean boundary. ~30k pixel ops, well under 1ms.
         let search_window = (offset / 2).max(8).min(48);
         let search_start = offset.saturating_sub(search_window);
         let search_end = offset;
@@ -442,12 +451,10 @@ impl ScrollCaptureService {
 
         let mut best_cut = offset.saturating_sub(1);
         let mut best_sad = u64::MAX;
-
         for cut_row in search_start..search_end {
             let base_y = base.height() - offset + cut_row;
             let new_y = cut_row;
             if base_y >= base.height() || new_y >= new_frame.height() { continue; }
-
             let mut sad: u64 = 0;
             for xi in 0..x_count {
                 let x = (xi * x_step) as u32;
@@ -458,103 +465,43 @@ impl ScrollCaptureService {
                      + (base_raw[bx+1] as i32 - new_raw[nx+1] as i32).unsigned_abs() as u64
                      + (base_raw[bx+2] as i32 - new_raw[nx+2] as i32).unsigned_abs() as u64;
             }
-            if sad < best_sad {
-                best_sad = sad;
-                best_cut = cut_row;
-            }
+            if sad < best_sad { best_sad = sad; best_cut = cut_row; }
         }
 
-        // Soft quality gate: widen the blend zone when even the best cut isn't
-        // pixel-perfect. We DON'T hard-reject on SAD here — that responsibility
-        // sits in `detect_offset_ncc` via Lowe's ratio test.
-        let sad_threshold = (x_count as u64) * 3 * 25;
-        let high_seam_risk = best_sad > sad_threshold;
-
-        // ── Blend strategy ──
+        // ── SHARP cut at best_cut — NO blending ──
         //
-        // Blend strategy — confirmed via team review (see commit message).
+        // Averaging two captures of the "same" overlap row darkens anti-aliased
+        // text edges (sub-pixel / gamma differences between captures) → the
+        // horizontal dark bands ("vạch tối") the user reported, worse on fast
+        // scroll. The SAD search above already found the row where base and new
+        // differ LEAST, so a hard cut there is seamless and never darkens.
         //
-        // ## Why blending often makes things WORSE
-        //
-        // In theory: if NCC offset is correct, base[y] and new[y] in the
-        // overlap refer to the SAME page row → blending = identity → no
-        // visible change.
-        //
-        // In practice: two `screencapture` invocations of "the same" row are
-        // NOT bitwise identical. Sub-pixel anti-aliasing (font hinting,
-        // compositor jitter, gamma) gives a ~3-8 RGB delta on text edges.
-        // Averaging two such captures in sRGB produces a DARKER midtone than
-        // either source — and that band sits next to UN-blended pixels → a
-        // visible darker horizontal stripe at the blend zone boundary. That
-        // band is exactly the "line đen" the user kept reporting.
-        //
-        // The previous narrow blend (blend_half=2) also had a math bug: the
-        // weight formula `1 - dist/(2*half+1)` gives weight=0.6 at the edge
-        // of the blend zone, NOT 0. The pixel JUST OUTSIDE the zone is pure
-        // base; the pixel inside is `0.4*base + 0.6*new`. Step discontinuity.
-        //
-        // ## Strategy
-        //
-        //   - NCC confident (≥ 0.75): sharp cut at SAD-minimum `best_cut`.
-        //     No averaging, no AA-darkening, no math discontinuity.
-        //     The SAD search already picked the row where prev and curr
-        //     differ LEAST — that's the best possible boundary.
-        //
-        //   - High SAD even at best cut (genuinely bad match — animation
-        //     overlap, dynamic content): widen blend to ±8 to soften the
-        //     misalignment. AA darkening is the lesser evil vs. a hard step
-        //     between unrelated rows.
-        let blend_half: u32 = if high_seam_risk { 8 } else { 0 };
-        let blend_start = best_cut.saturating_sub(blend_half);
-        let blend_end = (best_cut + blend_half).min(offset);
-
-        // First: copy new_frame rows after the cut (non-overlap new content)
-        for y in offset..new_frame.height() {
-            let dest_y = base.height() + y - offset;
-            if dest_y >= new_total { break; }
-            let src_off = y as usize * new_bpr;
-            let dst_off = dest_y as usize * bytes_per_row;
-            let copy_len = new_bpr.min(bytes_per_row).min(composite.len() - dst_off).min(new_raw.len() - src_off);
-            composite[dst_off..dst_off + copy_len].copy_from_slice(&new_raw[src_off..src_off + copy_len]);
+        // Assembly: base contributes everything ABOVE the cut; the new frame
+        // contributes from the cut row DOWN. One clean boundary, no overlap
+        // averaging, no math discontinuity.
+        let cut_dest = (base.height() - offset + best_cut) as usize;
+        for y in 0..cut_dest {
+            let src_off = y * base_bpr;
+            let dst_off = y * bytes_per_row;
+            let copy_len = base_bpr
+                .min(bytes_per_row)
+                .min(composite.len().saturating_sub(dst_off))
+                .min(base_raw.len().saturating_sub(src_off));
+            composite[dst_off..dst_off + copy_len]
+                .copy_from_slice(&base_raw[src_off..src_off + copy_len]);
         }
-
-        // Then: overwrite the blend zone with smooth transition
-        for y in blend_start..blend_end {
-            if y >= offset { break; }
-            let base_y = base.height() - offset + y;
-            let new_y = y;
-            let dest_y = base.height() - offset + y;
-            if base_y >= base.height() || new_y >= new_frame.height() { continue; }
-
-            let dist_from_cut = (y as i32 - best_cut as i32).unsigned_abs() as f32;
-            let weight = 1.0 - (dist_from_cut / (blend_half as f32 * 2.0 + 1.0));
-            let weight = weight.max(0.0).min(1.0);
-
-            let base_off = base_y as usize * base_bpr;
-            let new_off = new_y as usize * new_bpr;
-            let dst_off = dest_y as usize * bytes_per_row;
-
-            let pixel_count = width.min(base.width()).min(new_frame.width()) as usize;
-            for x in 0..pixel_count {
-                let bx = base_off + x * 4;
-                let nx = new_off + x * 4;
-                let dx = dst_off + x * 4;
-
-                if bx + 3 >= base_raw.len() || nx + 3 >= new_raw.len() || dx + 3 >= composite.len() { break; }
-
-                let br = base_raw[bx] as f32;
-                let bg = base_raw[bx + 1] as f32;
-                let bb = base_raw[bx + 2] as f32;
-
-                let nr = new_raw[nx] as f32;
-                let ng = new_raw[nx + 1] as f32;
-                let nb = new_raw[nx + 2] as f32;
-
-                composite[dx] = (br * (1.0 - weight) + nr * weight) as u8;
-                composite[dx + 1] = (bg * (1.0 - weight) + ng * weight) as u8;
-                composite[dx + 2] = (bb * (1.0 - weight) + nb * weight) as u8;
-                composite[dx + 3] = 255;
-            }
+        let new_h = new_frame.height() as usize;
+        for y in (best_cut as usize)..new_h {
+            let dest_y = cut_dest + (y - best_cut as usize);
+            if dest_y >= new_total as usize { break; }
+            let src_off = y * new_bpr;
+            let dst_off = dest_y * bytes_per_row;
+            let copy_len = new_bpr
+                .min(bytes_per_row)
+                .min(composite.len().saturating_sub(dst_off))
+                .min(new_raw.len().saturating_sub(src_off));
+            composite[dst_off..dst_off + copy_len]
+                .copy_from_slice(&new_raw[src_off..src_off + copy_len]);
         }
 
         *base = image::RgbaImage::from_raw(width, new_total, composite)
@@ -610,7 +557,8 @@ impl ScrollCaptureService {
 
         let session_start = SystemTime::now();
         let mut last_scroll_time = SystemTime::now();
-        let mut last_sync = SystemTime::now();
+        let mut last_thumb = SystemTime::now();
+        let mut last_clone = SystemTime::now();
         let mut frame_count: u32 = 1;
 
         loop {
@@ -648,8 +596,9 @@ impl ScrollCaptureService {
                 continue;
             }
 
-            // Screen changed! Now detect exact scroll offset
-            let offset_result = Self::detect_offset_ncc(&prev_image, &curr_image);
+            // Screen changed! First detection of this scroll — no prior offset,
+            // so full-range search (one-time cost).
+            let offset_result = Self::detect_offset_ncc(&prev_image, &curr_image, None);
             let min_offset = (curr_image.height() as f64 * MIN_OFFSET_RATIO)
                 .max(MIN_OFFSET_ABSOLUTE);
 
@@ -681,7 +630,7 @@ impl ScrollCaptureService {
             prev_image = curr_image.clone();
             frame_count += 1;
 
-            Self::sync_progress(&stitched, frame_count, &state, &app_handle, &mut last_sync);
+            Self::sync_progress(&stitched, frame_count, &state, &app_handle, &mut last_thumb, &mut last_clone);
 
             // ── Inner "active phase" loop ──
             //
@@ -697,6 +646,9 @@ impl ScrollCaptureService {
             let mut active_no_change = 0u32;
             let mut consecutive_too_fast = 0u32;
             let mut last_overlap_ratio: f32 = 1.0;
+            // Last accepted offset — used as the NARROW-search hint for the next
+            // frame so alignment stays cheap during continuous scrolling.
+            let mut last_offset = offset_result.offset;
             // Roll-back guard for the FINAL frame. When a scroll decelerates or
             // the page rubber-band-bounces at the end, the very last stitched
             // frame is captured mid-animation and aligns with marginal
@@ -758,7 +710,13 @@ impl ScrollCaptureService {
                     continue;
                 }
 
-                let offset_result = Self::detect_offset_ncc(&prev_image, &next_image);
+                // Narrow hinted search (cheap). If the user suddenly accelerated
+                // past the window, confidence drops → one full-range re-acquire.
+                let mut offset_result =
+                    Self::detect_offset_ncc(&prev_image, &next_image, Some(last_offset));
+                if offset_result.confidence < 0.7 {
+                    offset_result = Self::detect_offset_ncc(&prev_image, &next_image, None);
+                }
                 let min_off = (next_image.height() as f64 * MIN_OFFSET_RATIO)
                     .max(MIN_OFFSET_ABSOLUTE);
 
@@ -783,8 +741,10 @@ impl ScrollCaptureService {
                 }
                 consecutive_too_fast = 0;
 
-                // Record overlap ratio for the next sleep decision.
+                // Record overlap ratio for the next sleep decision + the offset
+                // as the next frame's narrow-search hint.
                 last_overlap_ratio = (offset_result.offset as f32) / (next_image.height() as f32);
+                last_offset = offset_result.offset;
 
                 // Remember state BEFORE this stitch so we can drop it if the
                 // scroll turns out to stop right after (weak final frame).
@@ -803,7 +763,7 @@ impl ScrollCaptureService {
                 prev_image = next_image;
                 frame_count += 1;
 
-                Self::sync_progress(&stitched, frame_count, &state, &app_handle, &mut last_sync);
+                Self::sync_progress(&stitched, frame_count, &state, &app_handle, &mut last_thumb, &mut last_clone);
             }
             // Back to idle phase
         }
@@ -1033,7 +993,8 @@ impl ScrollCaptureService {
             .saturating_sub(settle_ms);
 
         let mut frame_count: u32 = 1;
-        let mut last_sync = SystemTime::now();
+        let mut last_thumb = SystemTime::now();
+        let mut last_clone = SystemTime::now();
         let mut identical_frames: u32 = 0;
 
         loop {
@@ -1160,7 +1121,7 @@ impl ScrollCaptureService {
             // (which worked across the full range) PLUS the Lowe's ratio fix
             // we added for repetitive content. Best of both.
             // ── NCC offset detection ──
-            let aligned = Self::detect_offset_ncc(&prev_image, &curr_image);
+            let aligned = Self::detect_offset_ncc(&prev_image, &curr_image, None);
             let prev_h_phys = prev_image.height();
             let detected_scroll = curr_image.height().saturating_sub(aligned.offset);
 
@@ -1232,7 +1193,7 @@ impl ScrollCaptureService {
                 break;
             }
 
-            Self::sync_progress(&stitched, frame_count, &state, &app_handle, &mut last_sync);
+            Self::sync_progress(&stitched, frame_count, &state, &app_handle, &mut last_thumb, &mut last_clone);
         }
 
         // Final state sync — even if we throttled the last few syncs, snapshot now.
@@ -1388,38 +1349,35 @@ impl ScrollCaptureService {
         frame_count: u32,
         state: &Arc<Mutex<ScrollCaptureState>>,
         app_handle: &tauri::AppHandle,
-        last_sync: &mut SystemTime,
+        last_thumb: &mut SystemTime,
+        last_clone: &mut SystemTime,
     ) {
         let now = SystemTime::now();
-        let elapsed_ms = now
-            .duration_since(*last_sync)
-            .map(|d| d.as_millis())
-            .unwrap_or(u128::MAX);
+        let since = |t: &SystemTime| now.duration_since(*t).map(|d| d.as_millis()).unwrap_or(u128::MAX);
 
         let height = stitched.height();
-        // Bypass the throttle for the first handful of stitches. This gives the
-        // user instant visual feedback at the start of a scroll — important
-        // because the very first scroll-and-stitch sequence is when they're
-        // verifying the capture is working. After that, settle into the 3 Hz
-        // throttle to stay cheap during long captures.
-        let bypass_throttle_early = frame_count <= 5;
-        let should_sync_heavy = bypass_throttle_early || elapsed_ms >= STATE_SYNC_INTERVAL_MS;
 
-        // Clone outside the lock to avoid holding the mutex during a potentially large copy.
-        let snapshot = if should_sync_heavy { Some(stitched.clone()) } else { None };
-
+        // EXPENSIVE full-image clone into shared state — only as a rare safety
+        // net (the final image is synced on stop). Done outside the lock.
+        let do_clone = frame_count <= 3 || since(last_clone) >= STATE_SYNC_INTERVAL_MS;
+        let snapshot = if do_clone { Some(stitched.clone()) } else { None };
         {
             let mut s = state.lock().unwrap();
             if let Some(img) = snapshot {
                 s.stitched_image = Some(img);
             }
-            s.total_height = height;
+            s.total_height = height; // always cheap — keeps progress fresh
             s.frame_count = frame_count;
         }
+        if do_clone {
+            *last_clone = now;
+        }
 
-        if should_sync_heavy {
+        // CHEAP thumbnail (bottom-slice crop) — emit often so the side preview
+        // keeps up with the live scroll.
+        if frame_count <= 3 || since(last_thumb) >= THUMB_INTERVAL_MS {
             Self::emit_thumbnail(stitched, frame_count, app_handle);
-            *last_sync = now;
+            *last_thumb = now;
         }
     }
 
@@ -1562,7 +1520,7 @@ mod tests {
         let (base, new_frame) = make_scroll_pair(200, 400, scroll_amount);
         let expected_overlap = 400 - scroll_amount;
 
-        let result = ScrollCaptureService::detect_offset_ncc(&base, &new_frame);
+        let result = ScrollCaptureService::detect_offset_ncc(&base, &new_frame, None);
 
         assert!(result.confidence >= 0.7, "confidence should be >= 0.7, got {}", result.confidence);
         assert!(
@@ -1577,7 +1535,7 @@ mod tests {
         let base = solid_image(200, 400, 255, 0, 0);
         let other = solid_image(200, 400, 0, 0, 255);
 
-        let result = ScrollCaptureService::detect_offset_ncc(&base, &other);
+        let result = ScrollCaptureService::detect_offset_ncc(&base, &other, None);
 
         assert!(result.confidence < 0.7, "should have low confidence for unrelated images, got {}", result.confidence);
     }
@@ -1588,7 +1546,7 @@ mod tests {
         let (base, new_frame) = make_scroll_pair(200, 400, scroll_amount);
         let expected_overlap = 400 - scroll_amount;
 
-        let result = ScrollCaptureService::detect_offset_ncc(&base, &new_frame);
+        let result = ScrollCaptureService::detect_offset_ncc(&base, &new_frame, None);
 
         assert!(result.confidence >= 0.7, "confidence should be >= 0.7, got {}", result.confidence);
         assert!(
@@ -1878,9 +1836,19 @@ mod tests {
 
     #[test]
     fn test_capture_intervals_sane() {
-        assert!(CAPTURE_INTERVAL_FAST_MS < CAPTURE_INTERVAL_DEFAULT_MS);
-        assert!(CAPTURE_INTERVAL_FAST_MS >= 50, "Fast interval should not be below 50ms");
-        assert!(SETTLEMENT_DELAY_MS > CAPTURE_INTERVAL_DEFAULT_MS, "Settlement should be longer than default interval");
+        // Idle poll must be SHORT so we catch the start of a scroll while the
+        // frames still overlap (avoids dropping the first chunk).
+        assert!(
+            (30..=100).contains(&CAPTURE_INTERVAL_DEFAULT_MS),
+            "idle poll should be ~30-100ms to catch scroll start with overlap"
+        );
+        assert!(CAPTURE_INTERVAL_FAST_MS >= 30, "active interval should not be absurdly small");
+        assert!(SETTLEMENT_DELAY_MS > CAPTURE_INTERVAL_DEFAULT_MS, "Settlement should be longer than the poll");
+        // Preview thumbnail must emit more often than the heavy full-image clone.
+        assert!(
+            THUMB_INTERVAL_MS < STATE_SYNC_INTERVAL_MS,
+            "thumbnail should be emitted more frequently than the expensive state clone"
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -1942,7 +1910,7 @@ mod tests {
             let curr = &frames[i];
 
             // Detect overlap and stitch.
-            let offset = ScrollCaptureService::detect_offset_ncc(prev, curr);
+            let offset = ScrollCaptureService::detect_offset_ncc(prev, curr, None);
             assert!(
                 offset.confidence >= 0.7,
                 "frame {}: confidence {} too low (page_h={}, viewport_h={}, scroll_step={})",
@@ -2033,7 +2001,7 @@ mod tests {
         for i in 1..=n {
             let frame = page.view(0, (i as u32) * scroll_step, viewport_w, frame_h).to_image();
             let prev = page.view(0, ((i - 1) as u32) * scroll_step, viewport_w, frame_h).to_image();
-            let offset = ScrollCaptureService::detect_offset_ncc(&prev, &frame);
+            let offset = ScrollCaptureService::detect_offset_ncc(&prev, &frame, None);
             assert!(offset.confidence >= 0.7,
                 "iteration {}: confidence {} too low", i, offset.confidence);
             ScrollCaptureService::stitch_frame(&mut stitched, &frame, &offset).unwrap();
@@ -2077,7 +2045,7 @@ mod tests {
         let frame_a = page.view(0, 0, 120, 200).to_image();
         let frame_b = page.view(0, 40, 120, 200).to_image();
 
-        let result = ScrollCaptureService::detect_offset_ncc(&frame_a, &frame_b);
+        let result = ScrollCaptureService::detect_offset_ncc(&frame_a, &frame_b, None);
         assert!(result.confidence < 0.7,
             "repetitive-pattern frames should be rejected as ambiguous; got conf={:.3} offset={}",
             result.confidence, result.offset);
@@ -2099,7 +2067,7 @@ mod tests {
 
         let mut stitched = frames[0].clone();
         for i in 1..frames.len() {
-            let r = ScrollCaptureService::detect_offset_ncc(&frames[i - 1], &frames[i]);
+            let r = ScrollCaptureService::detect_offset_ncc(&frames[i - 1], &frames[i], None);
             // Stitcher gate matches production: confidence < 0.7 → skip.
             if r.confidence >= 0.7 {
                 ScrollCaptureService::stitch_frame(&mut stitched, &frames[i], &r).unwrap();
@@ -2383,16 +2351,15 @@ mod tests {
     }
 
     #[test]
-    fn dark_edge_slivers_in_captured_frames_propagate_into_output() {
-        // Reproduces the root cause hypothesis (Agent B's audit):
-        // If captured frames have a dark 1-px sliver at top/bottom rows (from
-        // scroll-border overlay AA bleeding ONE physical pixel inside the rect),
-        // then stitched output gets dark rows at regular intervals.
+    fn sharp_cut_suppresses_dark_edge_sliver_propagation() {
+        // Frames with a dark 1-px sliver at the BOTTOM edge (e.g. scroll-border
+        // AA bleeding one physical pixel into the rect) used to propagate into
+        // the output as equally-spaced dark bands — once per stitched frame.
         //
-        // Each frame contributes its BOTTOM rows to the new-content region,
-        // so its bottom-sliver lands in the stitched output at the position
-        // where that frame "ends" (= base_h + scroll_amount - 1 of that step).
-        // Across many steps, you see equally-spaced dark horizontal lines.
+        // The sharp-cut stitch (cut at the SAD-minimum seam, base above / new
+        // below, no overlap averaging) drops each frame's bottom overlap region
+        // at the cut, so the slivers no longer accumulate. We now expect AT MOST
+        // a couple of bands (the trailing edge of the final frame), not ≥5.
         let mut frame = solid_image(160, 320, 255, 255, 255);
         let dark = image::Rgba([60, 60, 60, 255]);
         for x in 0..160 {
@@ -2404,13 +2371,10 @@ mod tests {
             ScrollCaptureService::stitch_frame(&mut stitched, &frame, &result).unwrap();
         }
 
-        // We expect multiple dark bands. This test EXISTS to document the
-        // propagation behavior so the fix (don't let slivers reach captures
-        // in the first place) is verifiable downstream.
         let bands = detect_dark_band_rows(&stitched, 30);
         assert!(
-            bands.len() >= 5,
-            "expected ≥5 dark bands from sliver propagation; got {} at rows {:?}",
+            bands.len() <= 2,
+            "sharp cut should suppress sliver propagation to ≤2 bands; got {} at rows {:?}",
             bands.len(),
             bands.iter().take(10).collect::<Vec<_>>()
         );

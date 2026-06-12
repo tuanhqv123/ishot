@@ -65,6 +65,14 @@ pub fn request_input_monitoring() -> bool {
     }
 }
 
+/// Open System Settings directly at Privacy & Security → Input Monitoring so
+/// the user lands exactly where the iShot toggle lives.
+pub fn open_input_monitoring_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+        .spawn();
+}
+
 struct Shared {
     start: Instant,
     /// Signed running sums of (vertical, horizontal) scroll, in pixels, since `start`.

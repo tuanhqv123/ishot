@@ -84,6 +84,10 @@ interface Annotation {
 	seed?: number;
 	bold?: boolean;
 	underline?: boolean;
+	/// Rich-text content (mixed bold/underline runs) of a textbox — the
+	/// contentEditable's innerHTML. `text` keeps the plain innerText for
+	/// empty-checks and as a legacy-export fallback.
+	html?: string;
 }
 
 // Excalidraw-style "Sloppiness": how hand-drawn / rough the stroke looks.
@@ -332,6 +336,141 @@ function App() {
 	// re-activates this one so clicking it always drops you into a usable tool.
 	const [lastShape, setLastShape] = useState<Tool>("rect");
 	const [editingTextId, setEditingTextId] = useState<number | null>(null);
+
+	// While editing a textbox, the B/U indicators track the CARET: as it moves
+	// through bold/underlined runs the buttons light up to show what typing
+	// here would produce — editor behavior, not per-box state. Font size stays
+	// per-box, synced on selection.
+	useEffect(() => {
+		if (editingTextId === null) return;
+		const sync = () => {
+			setFontBold(document.queryCommandState("bold"));
+			setFontUnderline(document.queryCommandState("underline"));
+		};
+		sync();
+		document.addEventListener("selectionchange", sync);
+		return () => document.removeEventListener("selectionchange", sync);
+	}, [editingTextId]);
+	useEffect(() => {
+		const target = editingTextId ?? selectedAnnotation;
+		if (target === null) return;
+		const ann = annotations.find(
+			(a) => a.id === target && a.type === "textbox",
+		);
+		if (ann?.fontSize) setFontSize(ann.fontSize);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [editingTextId, selectedAnnotation]);
+
+	// Toggle bold/underline at the caret of the textbox being edited.
+	//
+	// With a real selection, execCommand handles the toggle fine. With a
+	// COLLAPSED caret inside a styled run, WebKit can't reliably end the run —
+	// typing keeps the old style until the box loses focus ("phải click ra
+	// ngoài mới tắt được"). So for collapsed carets we do the editor-grade DOM
+	// surgery ourselves: insert a zero-width marker, then split the styling
+	// elements around it (off) or wrap it (on), and park the caret inside.
+	const toggleInlineStyle = useCallback(
+		(kind: "bold" | "underline") => {
+			const root = document.activeElement as HTMLElement | null;
+			if (!root || !root.isContentEditable) return;
+			const sel = window.getSelection();
+			if (!sel || sel.rangeCount === 0) return;
+
+			const syncIndicators = () => {
+				setFontBold(document.queryCommandState("bold"));
+				setFontUnderline(document.queryCommandState("underline"));
+			};
+
+			if (!sel.isCollapsed) {
+				document.execCommand(kind);
+				syncIndicators();
+				return;
+			}
+
+			const wasOn = document.queryCommandState(kind);
+			document.execCommand(
+				"insertHTML",
+				false,
+				'<span data-ts="1">\u200B</span>',
+			);
+			const marker = root.querySelector('[data-ts="1"]') as HTMLElement | null;
+			if (!marker) return;
+
+			const matches = (el: HTMLElement) => {
+				const tag = el.tagName;
+				if (kind === "bold")
+					return (
+						tag === "B" ||
+						tag === "STRONG" ||
+						/^(bold|[5-9]00)$/.test(el.style.fontWeight || "")
+					);
+				return (
+					tag === "U" ||
+					/underline/.test(
+						el.style.textDecorationLine || el.style.textDecoration || "",
+					)
+				);
+			};
+			// Lift `node` one level: out of its parent, splitting the parent's
+			// trailing children into a clone so document order is preserved.
+			const splitOut = (node: Node) => {
+				const p = node.parentElement;
+				if (!p || !p.parentNode) return;
+				const right = p.cloneNode(false) as HTMLElement;
+				while (node.nextSibling) right.appendChild(node.nextSibling);
+				p.parentNode.insertBefore(node, p.nextSibling);
+				if (right.hasChildNodes())
+					p.parentNode.insertBefore(right, node.nextSibling);
+				if (!p.hasChildNodes()) p.remove();
+			};
+
+			if (wasOn) {
+				// OFF: keep splitting until no styled element remains above the marker.
+				for (let guard = 0; guard < 20; guard++) {
+					let found: HTMLElement | null = null;
+					for (
+						let a: HTMLElement | null = marker.parentElement;
+						a && a !== root;
+						a = a.parentElement
+					) {
+						if (matches(a)) {
+							found = a;
+							break;
+						}
+					}
+					if (!found) break;
+					while (found.contains(marker)) splitOut(marker);
+				}
+			} else {
+				// ON: wrap the marker so typing continues inside the new style.
+				const wrap = document.createElement(kind === "bold" ? "b" : "u");
+				marker.parentNode?.insertBefore(wrap, marker);
+				wrap.appendChild(marker);
+			}
+
+			// Caret right after the zero-width space, inside the marker.
+			const tn = marker.firstChild;
+			if (tn) {
+				const r = document.createRange();
+				r.setStart(tn, 1);
+				r.collapse(true);
+				sel.removeAllRanges();
+				sel.addRange(r);
+			}
+			marker.removeAttribute("data-ts");
+
+			// The DOM changed without an input event — persist it ourselves.
+			const html = root.innerHTML;
+			const text = root.innerText.replace(/\u200B/g, "");
+			const target = editingTextId;
+			if (target !== null)
+				setAnnotations((prev) =>
+					prev.map((a) => (a.id === target ? { ...a, html, text } : a)),
+				);
+			syncIndicators();
+		},
+		[editingTextId],
+	);
 	const [shiftHeld, setShiftHeld] = useState(false);
 	const [lockedByOther, setLockedByOther] = useState(false);
 	const [scrollCapturing, setScrollCapturing] = useState(false);
@@ -581,28 +720,70 @@ function App() {
 				sh,
 			);
 
-		// Draw textbox annotations
+		// Draw textbox annotations.
+		// Rich boxes (mixed bold/underline runs) are rasterized via an SVG
+		// foreignObject snapshot of the SAME html + css the editor showed —
+		// pixel-faithful WYSIWYG, including wrapping. The inner div is scaled
+		// up so text rasterizes at the export resolution, not screen px.
+		const drawRichTextbox = (ann: Annotation) =>
+			new Promise<void>((resolve) => {
+				// contentEditable HTML (e.g. bare <br>) isn't valid XML — round-trip
+				// it through XMLSerializer so foreignObject's XML parser accepts it.
+				const tmp = document.createElement("div");
+				tmp.innerHTML = ann.html || "";
+				const xhtml = new XMLSerializer()
+					.serializeToString(tmp)
+					.replace(/^<div[^>]*>/, "")
+					.replace(/<\/div>$/, "");
+				const w = Math.ceil(ann.w! * scale);
+				const h = Math.ceil(ann.h! * scale);
+				const style =
+					`transform:scale(${scale});transform-origin:0 0;` +
+					`width:${ann.w}px;height:${ann.h}px;padding:2px;box-sizing:border-box;` +
+					`color:${ann.color || "#ff0000"};` +
+					`font:${ann.fontSize || 16}px Helvetica, Arial, sans-serif;` +
+					`line-height:1.3;white-space:pre-wrap;word-break:break-word;overflow:hidden;`;
+				const svg =
+					`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
+					`<foreignObject width="100%" height="100%">` +
+					`<div xmlns="http://www.w3.org/1999/xhtml" style="${style}">${xhtml}</div>` +
+					`</foreignObject></svg>`;
+				const img = new Image();
+				img.onload = () => {
+					ctx.drawImage(img, ann.x * scale, ann.y * scale);
+					resolve();
+				};
+				img.onerror = () => resolve();
+				img.src =
+					"data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+			});
+
 		for (const ann of annotations) {
-			if (ann.type === "textbox" && ann.text && ann.w && ann.h) {
-				const fs = (ann.fontSize || 16) * scale;
-				ctx.fillStyle = ann.color || "#ff0000";
-				ctx.font = `${ann.bold ? "bold " : ""}${fs}px sans-serif`;
-				ctx.textBaseline = "top";
-				const lines = ann.text.split("\n");
-				const lineH = fs * 1.3;
-				for (let li = 0; li < lines.length; li++) {
-					const tx = ann.x * scale,
-						ty = (ann.y + 2) * scale + li * lineH;
-					ctx.fillText(lines[li], tx, ty, ann.w * scale);
-					if (ann.underline) {
-						const metrics = ctx.measureText(lines[li]);
-						ctx.fillRect(
-							tx,
-							ty + fs * 1.1,
-							Math.min(metrics.width, ann.w * scale),
-							Math.max(1, fs / 12),
-						);
-					}
+			if (ann.type !== "textbox" || !ann.text?.trim() || !ann.w || !ann.h)
+				continue;
+			if (ann.html) {
+				await drawRichTextbox(ann);
+				continue;
+			}
+			// Legacy plain-text path (boxes created before rich text existed).
+			const fs = (ann.fontSize || 16) * scale;
+			ctx.fillStyle = ann.color || "#ff0000";
+			ctx.font = `${ann.bold ? "bold " : ""}${fs}px sans-serif`;
+			ctx.textBaseline = "top";
+			const lines = ann.text.split("\n");
+			const lineH = fs * 1.3;
+			for (let li = 0; li < lines.length; li++) {
+				const tx = ann.x * scale,
+					ty = (ann.y + 2) * scale + li * lineH;
+				ctx.fillText(lines[li], tx, ty, ann.w * scale);
+				if (ann.underline) {
+					const metrics = ctx.measureText(lines[li]);
+					ctx.fillRect(
+						tx,
+						ty + fs * 1.1,
+						Math.min(metrics.width, ann.w * scale),
+						Math.max(1, fs / 12),
+					);
 				}
 			}
 		}
@@ -2069,9 +2250,8 @@ function App() {
 					h: tempBlur.height,
 					color: strokeColor,
 					text: "",
+					html: "",
 					fontSize,
-					bold: fontBold,
-					underline: fontUnderline,
 				},
 			]);
 			setEditingTextId(id);
@@ -2362,15 +2542,50 @@ function App() {
 							/>
 						))}
 
-					{/* Textbox annotations */}
+					{/* Textbox annotations.
+					    zIndex 11: the drawing canvas comes LATER in the DOM at zIndex 10,
+					    so anything ≤10 here is unclickable — that's why clicking a
+					    committed textbox did nothing.
+					    Interactions: drag the box to move it; release without moving to
+					    start editing (caret in the textarea); × button or ⌫ deletes. */}
 					{annotations
 						.filter((a) => a.type === "textbox")
 						.map((ann) => (
 							<div
 								key={ann.id}
-								onClick={() => {
+								onMouseDown={(e) => {
+									// While editing this box, leave the mouse to the textarea
+									// (caret placement, text selection).
+									if (editingTextId === ann.id) return;
+									e.preventDefault();
+									e.stopPropagation();
 									setSelectedAnnotation(ann.id);
-									setEditingTextId(ann.id);
+									const startX = e.clientX,
+										startY = e.clientY,
+										origX = ann.x,
+										origY = ann.y;
+									let moved = false;
+									const onMove = (me: MouseEvent) => {
+										const dx = me.clientX - startX,
+											dy = me.clientY - startY;
+										if (!moved && Math.hypot(dx, dy) < 4) return;
+										moved = true;
+										setAnnotations((prev) =>
+											prev.map((a) =>
+												a.id === ann.id
+													? { ...a, x: origX + dx, y: origY + dy }
+													: a,
+											),
+										);
+									};
+									const onUp = () => {
+										window.removeEventListener("mousemove", onMove);
+										window.removeEventListener("mouseup", onUp);
+										// A plain click (no drag) = continue typing here.
+										if (!moved) setEditingTextId(ann.id);
+									};
+									window.addEventListener("mousemove", onMove);
+									window.addEventListener("mouseup", onUp);
 								}}
 								style={{
 									position: "absolute",
@@ -2378,31 +2593,102 @@ function App() {
 									top: selection.y + ann.y,
 									width: ann.w,
 									height: ann.h,
-									zIndex: 10,
+									zIndex: 11,
+									cursor: editingTextId === ann.id ? "text" : "move",
+									borderRadius: 4,
+									// Committed text reads as part of the image — the frame
+									// only appears while the box is selected/being edited.
+									// Hairline system-blue, not a heavy 2px stroke.
+									// (transparent, not none, so nothing shifts by 1px.)
 									border:
-										ann.id === selectedAnnotation
-											? "2px solid #007aff"
-											: "2px solid rgba(0,122,255,0.7)",
+										ann.id === selectedAnnotation ||
+										editingTextId === ann.id
+											? "1px solid rgba(0, 122, 255, 0.8)"
+											: "1px solid transparent",
+									boxShadow:
+										ann.id === selectedAnnotation ||
+										editingTextId === ann.id
+											? "0 0 0 3px rgba(0, 122, 255, 0.12)"
+											: "none",
 								}}
 							>
-								<textarea
-									value={ann.text || ""}
-									placeholder="Type here..."
+								{ann.id === selectedAnnotation && (
+									<button
+										onMouseDown={(e) => {
+											e.preventDefault();
+											e.stopPropagation();
+										}}
+										onClick={(e) => {
+											e.stopPropagation();
+											setAnnotations((prev) =>
+												prev.filter((a) => a.id !== ann.id),
+											);
+											setSelectedAnnotation(null);
+											setEditingTextId(null);
+										}}
+										title="Delete"
+										style={{
+											position: "absolute",
+											top: -7,
+											right: -7,
+											width: 16,
+											height: 16,
+											borderRadius: "50%",
+											border: "0.5px solid rgba(255, 255, 255, 0.25)",
+											background: "rgba(28, 28, 30, 0.8)",
+											backdropFilter: "blur(8px)",
+											WebkitBackdropFilter: "blur(8px)",
+											color: "rgba(255, 255, 255, 0.9)",
+											fontSize: 8,
+											fontWeight: 600,
+											lineHeight: "15px",
+											textAlign: "center",
+											padding: 0,
+											cursor: "pointer",
+											zIndex: 12,
+										}}
+									>
+										✕
+									</button>
+								)}
+								{/* Rich-text editor: contentEditable so bold/underline apply
+								    per-RUN at the caret (toggle B mid-typing affects only what
+								    comes next), not to the whole box. UNCONTROLLED on purpose:
+								    React must never write innerHTML on re-render or the caret
+								    would jump — content is seeded once via the ref. */}
+								<div
+									contentEditable
+									suppressContentEditableWarning
+									data-ph="Type here..."
 									ref={(el) => {
-										if (el && ann.id === editingTextId) el.focus();
+										if (!el) return;
+										if (!el.innerHTML && ann.html) el.innerHTML = ann.html;
+										if (ann.id === editingTextId && document.activeElement !== el) {
+											el.focus();
+											// Caret at the end so "continue typing" continues.
+											const r = document.createRange();
+											r.selectNodeContents(el);
+											r.collapse(false);
+											const sel = window.getSelection();
+											sel?.removeAllRanges();
+											sel?.addRange(r);
+										}
 									}}
-									onChange={(e) =>
+									onInput={(e) => {
+										const el = e.currentTarget;
+										const html = el.innerHTML;
+										const text = el.innerText;
 										setAnnotations((prev) =>
 											prev.map((a) =>
-												a.id === ann.id ? { ...a, text: e.target.value } : a,
+												a.id === ann.id ? { ...a, html, text } : a,
 											),
-										)
-									}
+										);
+									}}
 									onFocus={() => setEditingTextId(ann.id)}
-									onBlur={() => {
+									onBlur={(e) => {
 										setEditingTextId(null);
 										// Remove empty textbox on blur
-										if (!ann.text?.trim())
+										if (!e.currentTarget.innerText.trim())
 											setAnnotations((prev) =>
 												prev.filter((a) => a.id !== ann.id),
 											);
@@ -2415,13 +2701,13 @@ function App() {
 										outline: "none",
 										color: ann.color || "#ff0000",
 										fontSize: ann.fontSize || 16,
-										fontFamily: "sans-serif",
-										fontWeight: ann.bold ? "bold" : "normal",
-										textDecoration: ann.underline ? "underline" : "none",
-										resize: "none",
+										fontFamily: "Helvetica, Arial, sans-serif",
 										padding: 2,
 										lineHeight: 1.3,
 										caretColor: ann.color || "#ff0000",
+										whiteSpace: "pre-wrap",
+										wordBreak: "break-word",
+										overflow: "hidden",
 									}}
 								/>
 							</div>
@@ -2804,7 +3090,12 @@ function App() {
 													/>
 												</>
 											)}
-											{/* Font size + bold/underline for textbox */}
+											{/* Font size (per box) + bold/underline (per RUN).
+											    B/U run document.execCommand at the caret of the
+											    contentEditable, exactly like a text editor: existing
+											    runs keep their style, what you type next uses the
+											    new one. onMouseDown preventDefault keeps focus (and
+											    the caret/selection) inside the box while clicking. */}
 											{tool === "textbox" && (
 												<>
 													<DropPicker
@@ -2813,10 +3104,24 @@ function App() {
 														onChange={(v) => {
 															setFontSize(v);
 															localStorage.setItem("ishot-fontsize", String(v));
+															const target = editingTextId ?? selectedAnnotation;
+															if (target !== null)
+																setAnnotations((prev) =>
+																	prev.map((a) =>
+																		a.id === target && a.type === "textbox"
+																			? { ...a, fontSize: v }
+																			: a,
+																	),
+																);
 														}}
 													/>
 													<button
-														onClick={() => setFontBold(!fontBold)}
+														onMouseDown={(e) => e.preventDefault()}
+														onClick={() => {
+															if (editingTextId !== null)
+																toggleInlineStyle("bold");
+															else setFontBold(!fontBold);
+														}}
 														title="Bold"
 														style={{
 															width: 28,
@@ -2837,7 +3142,12 @@ function App() {
 														B
 													</button>
 													<button
-														onClick={() => setFontUnderline(!fontUnderline)}
+														onMouseDown={(e) => e.preventDefault()}
+														onClick={() => {
+															if (editingTextId !== null)
+																toggleInlineStyle("underline");
+															else setFontUnderline(!fontUnderline);
+														}}
 														title="Underline"
 														style={{
 															width: 28,
@@ -2923,6 +3233,9 @@ function App() {
 					{/* Hint — positioned below both toolbar bars */}
 					{getHintText() &&
 						(() => {
+							// The hint rides WITH the toolbar: same row math, same center,
+							// same drag offset, same above/below flip — otherwise it sits
+							// at the selection's left edge while the toolbar is centered.
 							const hintHasRow2 =
 								tool === "rect" ||
 								tool === "oval" ||
@@ -2932,18 +3245,41 @@ function App() {
 								tool === "textbox" ||
 								tool === "blur" ||
 								!!selectedBlurAnn;
-							const hintOffset = 50 + (hintHasRow2 ? 44 : 0);
+							const row1H = 44,
+								row2H = 40,
+								gap = 4;
+							const totalH = row1H + (hintHasRow2 ? row2H + gap : 0);
 							const spaceBelow =
 								window.innerHeight - (selection.y + selection.height);
-							const hintTop =
-								spaceBelow < hintOffset + 50
-									? selection.y - 40
-									: selection.y + selection.height + hintOffset;
+							const showAbove = spaceBelow < totalH + 16;
+							const baseTop = showAbove
+								? selection.y - totalH - 8
+								: selection.y + selection.height + 8;
+							const row1Top = Math.min(
+								Math.max(4, Math.max(4, baseTop) + toolbarOffset.y),
+								window.innerHeight - row1H - 4,
+							);
+							const widestRow = hintHasRow2
+								? Math.max(toolbarRow1W, toolbarRow2W)
+								: toolbarRow1W;
+							const toolbarLeft = Math.max(
+								4,
+								Math.min(
+									selection.x + selection.width / 2 - widestRow / 2 + toolbarOffset.x,
+									window.innerWidth - widestRow - 4,
+								),
+							);
+							// Below the full toolbar stack (or above row 1 when flipped).
+							// Rows stack LEFT-ALIGNED at toolbarLeft (see barStyle) — the
+							// hint joins the same stack, same left edge.
+							const hintTop = showAbove
+								? row1Top - 38
+								: row1Top + totalH + 10;
 							return (
 								<div
 									style={{
 										position: "absolute",
-										left: selection.x,
+										left: toolbarLeft,
 										top: hintTop,
 										maxWidth: selection.width,
 										background: "rgba(0,0,0,0.85)",

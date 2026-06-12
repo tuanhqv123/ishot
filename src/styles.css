@@ -177,3 +177,11 @@ body {
   transition: transform 100ms ease;
 }
 .ishot-range::-webkit-slider-thumb:active { transform: scale(1.15); }
+
+/* Placeholder for the textbox annotation's contentEditable (textarea's native
+   placeholder doesn't exist there). Shows only while truly empty. */
+[contenteditable][data-ph]:empty::before {
+  content: attr(data-ph);
+  color: rgba(128, 128, 128, 0.7);
+  pointer-events: none;
+}

@@ -101,6 +101,104 @@ function roughFor(s: Sloppiness | undefined): { roughness: number; bowing: numbe
 	}
 }
 
+// A geometric shape to paint, in logical canvas coordinates.
+type ShapeSpec =
+	| { kind: "rect"; x: number; y: number; w: number; h: number }
+	| { kind: "oval"; cx: number; cy: number; w: number; h: number }
+	| { kind: "line"; x1: number; y1: number; x2: number; y2: number }
+	| {
+			kind: "arrow";
+			x1: number;
+			y1: number;
+			x2: number;
+			y2: number;
+			headLen: number;
+			spread: number;
+	  };
+
+// Single place that renders rect / oval / line / arrow, shared by the committed
+// redraw and the live drag-preview so they always match.
+//
+// Sloppiness 0 ("Smooth", the default) draws with NATIVE canvas paths — the
+// standard, fully anti-aliased renderer — so straight/diagonal edges are crisp
+// instead of the grainy doubled edge rough.js leaves. Levels 1-2 keep rough.js
+// for the intentional hand-drawn Excalidraw look.
+function paintShape(
+	ctx: CanvasRenderingContext2D,
+	rc: ReturnType<typeof rough.canvas>,
+	s: Sloppiness,
+	spec: ShapeSpec,
+	style: { color: string; lw: number; seed: number },
+) {
+	const { color, lw, seed } = style;
+	const arrowHead = (
+		emit: (fromX: number, fromY: number, toX: number, toY: number) => void,
+		a: Extract<ShapeSpec, { kind: "arrow" }>,
+	) => {
+		const angle = Math.atan2(a.y2 - a.y1, a.x2 - a.x1);
+		emit(a.x1, a.y1, a.x2, a.y2);
+		emit(
+			a.x2,
+			a.y2,
+			a.x2 - a.headLen * Math.cos(angle - a.spread),
+			a.y2 - a.headLen * Math.sin(angle - a.spread),
+		);
+		emit(
+			a.x2,
+			a.y2,
+			a.x2 - a.headLen * Math.cos(angle + a.spread),
+			a.y2 - a.headLen * Math.sin(angle + a.spread),
+		);
+	};
+
+	if (s === 0) {
+		ctx.save();
+		ctx.strokeStyle = color;
+		ctx.lineWidth = lw;
+		ctx.lineCap = "round";
+		ctx.lineJoin = "round";
+		ctx.beginPath();
+		if (spec.kind === "rect") ctx.rect(spec.x, spec.y, spec.w, spec.h);
+		else if (spec.kind === "oval")
+			ctx.ellipse(
+				spec.cx,
+				spec.cy,
+				Math.abs(spec.w) / 2,
+				Math.abs(spec.h) / 2,
+				0,
+				0,
+				Math.PI * 2,
+			);
+		else if (spec.kind === "line") {
+			ctx.moveTo(spec.x1, spec.y1);
+			ctx.lineTo(spec.x2, spec.y2);
+		} else if (spec.kind === "arrow")
+			arrowHead((fx, fy, tx, ty) => {
+				ctx.moveTo(fx, fy);
+				ctx.lineTo(tx, ty);
+			}, spec);
+		ctx.stroke();
+		ctx.restore();
+		return;
+	}
+
+	const ro = roughFor(s);
+	const opts = {
+		stroke: color,
+		strokeWidth: lw,
+		roughness: ro.roughness,
+		bowing: ro.bowing,
+		seed,
+	};
+	if (spec.kind === "rect") rc.rectangle(spec.x, spec.y, spec.w, spec.h, opts);
+	else if (spec.kind === "oval")
+		rc.ellipse(spec.cx, spec.cy, spec.w, spec.h, opts);
+	else if (spec.kind === "line")
+		rc.line(spec.x1, spec.y1, spec.x2, spec.y2, opts);
+	else if (spec.kind === "arrow")
+		arrowHead((fx, fy, tx, ty) => rc.line(fx, fy, tx, ty, opts), spec);
+}
+
 // Render a freehand stroke as a smooth, naturally-tapered filled path using
 // perfect-freehand (the same lib Excalidraw uses) — replaces the old raw
 // lineTo polyline that looked jagged/streaky.
@@ -475,8 +573,8 @@ function App() {
 				canvasRef.current,
 				0,
 				0,
-				selection.width,
-				selection.height,
+				canvasRef.current.width, // full dpr-scaled backing store, not logical
+				canvasRef.current.height,
 				0,
 				0,
 				sw,
@@ -1338,8 +1436,13 @@ function App() {
 
 	useEffect(() => {
 		if (stage === "editing" && selection && canvasRef.current) {
-			canvasRef.current.width = selection.width;
-			canvasRef.current.height = selection.height;
+			// Backing store at physical resolution (Retina = 2x logical) so strokes
+			// render crisp instead of upscaled/aliased. CSS size stays logical, so
+			// it still displays at the right on-screen size. redrawAnnotations()
+			// applies the matching ctx scale so all drawing stays in logical units.
+			const dpr = window.devicePixelRatio || 1;
+			canvasRef.current.width = Math.round(selection.width * dpr);
+			canvasRef.current.height = Math.round(selection.height * dpr);
 		}
 	}, [stage, selection]);
 
@@ -1347,7 +1450,14 @@ function App() {
 		const canvas = canvasRef.current;
 		if (!canvas || !selection) return;
 		const ctx = canvas.getContext("2d")!;
+		// Canvas backing store is dpr-scaled (see the sizing effect). Reset to
+		// device space to clear the whole buffer, then scale so every draw call
+		// below works in logical pixels. The live drag-preview (which calls this
+		// then keeps drawing on the same ctx) inherits this transform.
+		const dpr = window.devicePixelRatio || 1;
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
+		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.lineCap = "round";
 		ctx.lineJoin = "round";
 		const rc = rough.canvas(canvas);
@@ -1357,56 +1467,46 @@ function App() {
 			const isSelected = ann.id === selectedAnnotation;
 			const color = isSelected ? "#007aff" : ann.color || "#ff0000";
 			const lw = isSelected ? (ann.strokeWidth || 2) + 1 : ann.strokeWidth || 2;
-			// rough.js options. Stable `seed` (per-annotation) keeps the hand-drawn
-			// jitter identical across every redraw instead of re-randomizing.
-			const ro = roughFor(ann.sloppiness);
-			const opts = {
-				stroke: color,
-				strokeWidth: lw,
-				roughness: ro.roughness,
-				bowing: ro.bowing,
-				seed: ann.seed || ann.id || 1,
-			};
+			// Stable `seed` (per-annotation) keeps the hand-drawn jitter identical
+			// across every redraw instead of re-randomizing.
+			const s = ann.sloppiness ?? 0;
+			const style = { color, lw, seed: ann.seed || ann.id || 1 };
 
 			if (ann.type === "rect" && ann.w !== undefined) {
 				// Normalize so negative w/h (drawn right-to-left) render cleanly.
-				rc.rectangle(
-					Math.min(ann.x, ann.x + ann.w),
-					Math.min(ann.y, ann.y + ann.h!),
-					Math.abs(ann.w),
-					Math.abs(ann.h!),
-					opts,
-				);
+				paintShape(ctx, rc, s, {
+					kind: "rect",
+					x: Math.min(ann.x, ann.x + ann.w),
+					y: Math.min(ann.y, ann.y + ann.h!),
+					w: Math.abs(ann.w),
+					h: Math.abs(ann.h!),
+				}, style);
 			} else if (ann.type === "oval" && ann.w !== undefined) {
-				rc.ellipse(
-					ann.x + ann.w / 2,
-					ann.y + ann.h! / 2,
-					Math.abs(ann.w),
-					Math.abs(ann.h!),
-					opts,
-				);
+				paintShape(ctx, rc, s, {
+					kind: "oval",
+					cx: ann.x + ann.w / 2,
+					cy: ann.y + ann.h! / 2,
+					w: Math.abs(ann.w),
+					h: Math.abs(ann.h!),
+				}, style);
 			} else if (ann.type === "arrow" && ann.ex !== undefined) {
-				// Bold "V" head that grows with stroke width (wide 36° opening).
-				const headLen = Math.max(18, lw * 5.5),
-					spread = Math.PI / 5,
-					angle = Math.atan2(ann.ey! - ann.y, ann.ex - ann.x);
-				rc.line(ann.x, ann.y, ann.ex, ann.ey!, opts);
-				rc.line(
-					ann.ex,
-					ann.ey!,
-					ann.ex - headLen * Math.cos(angle - spread),
-					ann.ey! - headLen * Math.sin(angle - spread),
-					opts,
-				);
-				rc.line(
-					ann.ex,
-					ann.ey!,
-					ann.ex - headLen * Math.cos(angle + spread),
-					ann.ey! - headLen * Math.sin(angle + spread),
-					opts,
-				);
+				paintShape(ctx, rc, s, {
+					kind: "arrow",
+					x1: ann.x,
+					y1: ann.y,
+					x2: ann.ex,
+					y2: ann.ey!,
+					headLen: Math.max(18, lw * 5.5),
+					spread: Math.PI / 7,
+				}, style);
 			} else if (ann.type === "line" && ann.ex !== undefined) {
-				rc.line(ann.x, ann.y, ann.ex, ann.ey!, opts);
+				paintShape(ctx, rc, s, {
+					kind: "line",
+					x1: ann.x,
+					y1: ann.y,
+					x2: ann.ex,
+					y2: ann.ey!,
+				}, style);
 			} else if (ann.type === "draw" && ann.path && ann.path.length > 0) {
 				// Smooth, naturally-tapered freehand via perfect-freehand.
 				drawFreehand(ctx, ann.path, color, ann.strokeWidth || 4);
@@ -1804,58 +1904,45 @@ function App() {
 
 		redrawAnnotations();
 		const ctx = canvasRef.current!.getContext("2d")!;
-		ctx.strokeStyle = strokeColor;
-		ctx.lineWidth = strokeWidth;
-		ctx.lineCap = "round";
-		// Live preview uses the same rough.js renderer with a FIXED seed so the
-		// shape stays stable (no re-jitter) while the user drags it out.
+		// Live preview shares paintShape() with the committed render. A FIXED seed
+		// keeps the hand-drawn jitter stable while the user drags the shape out.
 		const rc = rough.canvas(canvasRef.current!);
-		const ro = roughFor(sloppiness);
-		const opts = {
-			stroke: strokeColor,
-			strokeWidth,
-			roughness: ro.roughness,
-			bowing: ro.bowing,
-			seed: PREVIEW_SEED,
-		};
+		const style = { color: strokeColor, lw: strokeWidth, seed: PREVIEW_SEED };
 
 		if (tool === "rect")
-			rc.rectangle(
-				Math.min(drawStart.x, x),
-				Math.min(drawStart.y, y),
-				Math.abs(x - drawStart.x),
-				Math.abs(y - drawStart.y),
-				opts,
-			);
+			paintShape(ctx, rc, sloppiness, {
+				kind: "rect",
+				x: Math.min(drawStart.x, x),
+				y: Math.min(drawStart.y, y),
+				w: Math.abs(x - drawStart.x),
+				h: Math.abs(y - drawStart.y),
+			}, style);
 		else if (tool === "oval") {
-			rc.ellipse(
-				(drawStart.x + x) / 2,
-				(drawStart.y + y) / 2,
-				Math.abs(x - drawStart.x),
-				Math.abs(y - drawStart.y),
-				opts,
-			);
+			paintShape(ctx, rc, sloppiness, {
+				kind: "oval",
+				cx: (drawStart.x + x) / 2,
+				cy: (drawStart.y + y) / 2,
+				w: Math.abs(x - drawStart.x),
+				h: Math.abs(y - drawStart.y),
+			}, style);
 		} else if (tool === "arrow") {
-			const headLen = Math.max(18, strokeWidth * 5.5),
-				spread = Math.PI / 5,
-				angle = Math.atan2(y - drawStart.y, x - drawStart.x);
-			rc.line(drawStart.x, drawStart.y, x, y, opts);
-			rc.line(
-				x,
-				y,
-				x - headLen * Math.cos(angle - spread),
-				y - headLen * Math.sin(angle - spread),
-				opts,
-			);
-			rc.line(
-				x,
-				y,
-				x - headLen * Math.cos(angle + spread),
-				y - headLen * Math.sin(angle + spread),
-				opts,
-			);
+			paintShape(ctx, rc, sloppiness, {
+				kind: "arrow",
+				x1: drawStart.x,
+				y1: drawStart.y,
+				x2: x,
+				y2: y,
+				headLen: Math.max(18, strokeWidth * 5.5),
+				spread: Math.PI / 7,
+			}, style);
 		} else if (tool === "line") {
-			rc.line(drawStart.x, drawStart.y, x, y, opts);
+			paintShape(ctx, rc, sloppiness, {
+				kind: "line",
+				x1: drawStart.x,
+				y1: drawStart.y,
+				x2: x,
+				y2: y,
+			}, style);
 		} else if (tool === "draw" && currentPath.length > 0) {
 			drawFreehand(ctx, [...currentPath, { x: rawX, y: rawY }], strokeColor, strokeWidth);
 		}

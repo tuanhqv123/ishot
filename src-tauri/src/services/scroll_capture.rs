@@ -23,7 +23,7 @@ use core_graphics::geometry::CGPoint;
 const MAX_SCROLL_HEIGHT: u32 = 20000;
 
 // Capture interval range (adaptive)
-const CAPTURE_INTERVAL_FAST_MS: u64 = 100;
+const CAPTURE_INTERVAL_FAST_MS: u64 = 70;
 // Idle poll: how often we look for the START of a scroll. Must be SHORT —
 // at 250ms a medium-fast scroll moved most of a viewport before we noticed,
 // so the first frame had little overlap and the chunk got dropped (the "mất
@@ -60,8 +60,10 @@ const THUMB_INTERVAL_MS: u128 = 90;
 // do this rarely (a stale-state safety net), NOT on the preview cadence.
 const STATE_SYNC_INTERVAL_MS: u128 = 1200;
 
-// Preview thumbnail target width (matches scroll-panel.html .preview width).
-const PREVIEW_THUMB_WIDTH_PX: u32 = 216;
+// Preview thumbnail target width. The panel displays at 220 CSS px, which is
+// 440 PHYSICAL px on Retina — encoding at 1× left the preview visibly blurry
+// (upscaled 2×). Encode at 2× the CSS width so it's pixel-sharp on Retina.
+const PREVIEW_THUMB_WIDTH_PX: u32 = 440;
 // Preview pane aspect ratio (height / width). Slightly portrait.
 const PREVIEW_THUMB_ASPECT: f64 = 280.0 / 216.0;
 
@@ -561,6 +563,21 @@ impl ScrollCaptureService {
         let mut last_clone = SystemTime::now();
         let mut frame_count: u32 = 1;
 
+        // ── EXACT-OFFSET path (preferred) ──
+        // A listen-only scroll-event tap tells us precisely how many pixels the
+        // user scrolled, so each frame is pasted at a KNOWN offset — no guessing,
+        // which is what caused the "mất phần / nhảy đoạn" content loss. Needs
+        // Input Monitoring; prompt once (takes effect next launch per macOS TCC),
+        // and fall back to image correlation until it's granted.
+        crate::services::scroll_events::request_input_monitoring();
+        if let Some(monitor) = crate::services::scroll_events::ScrollMonitor::start() {
+            println!("[scroll] exact-offset capture (scroll-event tap)");
+            return Self::run_tracked_loop(
+                monitor, state, app_handle, rect, stitched, prev_image, frame_count,
+            );
+        }
+        println!("[scroll] Input Monitoring not granted — image-correlation fallback");
+
         loop {
             if state.lock().unwrap().should_stop.load(Ordering::SeqCst) {
                 return Self::stop_requested(stitched, frame_count, state, app_handle);
@@ -648,7 +665,14 @@ impl ScrollCaptureService {
             // blur / velocity spikes). We HOLD the baseline through these so the
             // offset accumulates, instead of bailing immediately.
             let mut unaligned = 0u32;
-            let mut last_overlap_ratio: f32 = 1.0;
+            // Seed from the scroll WE JUST DETECTED so the very first active
+            // sleep matches the real speed. Starting at 1.0 made the first frame
+            // sleep the max (100ms) — if the user was already scrolling at a
+            // normal/fast pace, that window overshot a whole viewport, the next
+            // frame shared almost nothing, alignment failed, and the chunk was
+            // dropped ("mất phần / nhảy đoạn"). This hits mouse AND trackpad.
+            let mut last_overlap_ratio: f32 =
+                offset_result.offset as f32 / curr_image.height().max(1) as f32;
             // Last accepted offset — used as the NARROW-search hint for the next
             // frame so alignment stays cheap during continuous scrolling.
             let mut last_offset = offset_result.offset;
@@ -687,11 +711,13 @@ impl ScrollCaptureService {
                 }
 
                 let sleep_ms = if last_overlap_ratio < 0.40 {
-                    30
+                    25
                 } else if last_overlap_ratio < 0.70 {
-                    70
+                    45
                 } else {
-                    CAPTURE_INTERVAL_FAST_MS // 100
+                    CAPTURE_INTERVAL_FAST_MS // 70 — slow reading; still tight
+                                             // enough that a sudden fling only
+                                             // risks one short window.
                 };
                 thread::sleep(Duration::from_millis(sleep_ms));
 
@@ -735,6 +761,12 @@ impl ScrollCaptureService {
                     // it cleanly. Only give up after MANY misses — that means the
                     // scroll truly stopped, or the jump exceeded one viewport.
                     unaligned += 1;
+                    // Holding the baseline means we couldn't align = the page is
+                    // moving FAST. Force the next capture into the fast tier (was
+                    // staying at the stale slow interval because last_overlap_ratio
+                    // only updates on a successful stitch) so we catch the frame
+                    // where the scroll settles before even more content scrolls off.
+                    last_overlap_ratio = 0.0;
                     // Warn only if it persists, so a normal trackpad swipe doesn't
                     // trigger a false "too fast".
                     if unaligned == 5 {
@@ -778,6 +810,264 @@ impl ScrollCaptureService {
             }
             // Back to idle phase
         }
+    }
+
+    /// Capture loop driven by the EXACT scroll offset from a `ScrollMonitor`
+    /// (listen-only event tap) instead of guessing it from image correlation.
+    ///
+    /// "Capture per distance, not per time":
+    ///   * The tap accumulates exact pixel deltas as the user scrolls.
+    ///   * When ~45% of a viewport has scrolled past since the last frame, grab a
+    ///     frame. Capturing well before a full viewport scrolls past guarantees
+    ///     consecutive frames overlap >50% — content can't be skipped, at ANY
+    ///     scroll speed, on trackpad OR mouse.
+    ///   * The known scroll amount gives the exact paste offset; NCC runs only in
+    ///     a NARROW window around it to absorb smooth-scroll easing / snap drift.
+    ///     It never searches the full range, so repetitive content can no longer
+    ///     cause a duplicated or teleported stitch.
+    ///
+    /// COORDINATE SPACES — the one thing this loop must never get wrong:
+    /// the tap reports deltas in LOGICAL points (mouse space), but captured
+    /// frames and every stitch offset are in PHYSICAL pixels (2× on Retina).
+    /// All math below runs in PHYSICAL pixels; tap deltas are converted via
+    /// `scale` the moment they're read. Mixing the two halved every predicted
+    /// offset on Retina and made the stitch drop whole segments.
+    /// AXES — the session supports vertical OR horizontal scrolling, decided by
+    /// whichever axis the user moves first. Horizontal reuses the ENTIRE
+    /// vertical pipeline by transposing: every captured frame is rotated 90° CW
+    /// (right edge → bottom), stitched "vertically", and rotated 90° CCW back
+    /// for previews and the final image. Forward direction only: scroll DOWN
+    /// (vertical) / scroll RIGHT (horizontal).
+    #[allow(clippy::too_many_arguments)]
+    fn run_tracked_loop(
+        monitor: crate::services::scroll_events::ScrollMonitor,
+        state: Arc<Mutex<ScrollCaptureState>>,
+        app_handle: tauri::AppHandle,
+        rect: (f64, f64, f64, f64),
+        mut stitched: image::RgbaImage,
+        mut prev_image: image::RgbaImage,
+        mut frame_count: u32,
+    ) -> Result<Option<(Vec<u8>, u32, u32)>> {
+        let (x, y, width, height) = rect;
+
+        // Axis is decided by the first significant movement (logical px).
+        const AXIS_DECIDE_LOGICAL_PX: f64 = 24.0;
+        let mut axis_chosen = false;
+        let mut horizontal = false;
+
+        // Per-axis parameters — set when the axis is chosen. Defaults assume
+        // vertical so the stop path is valid even before any scroll.
+        let mut viewport = prev_image.height() as f64;
+        let mut scale = viewport / height.max(1.0);
+        let mut capture_threshold = (viewport * 0.45).max(80.0);
+        let mut capture_hard_cap = viewport * 0.80;
+        let mut min_stitch_px = (viewport * 0.05).max(MIN_OFFSET_ABSOLUTE * scale);
+
+        let session_start = SystemTime::now();
+        let mut last_thumb = SystemTime::now();
+        let mut last_clone = SystemTime::now();
+        // Exact scroll sums (y, x) at the moment `prev_image` was captured.
+        let mut anchor_sum = monitor.accumulated_xy();
+        let moved_on_axis = |now: (f64, f64), anchor: (f64, f64), horiz: bool| -> f64 {
+            if horiz { (now.1 - anchor.1).abs() } else { (now.0 - anchor.0).abs() }
+        };
+        // Presentation: horizontal mode stitches in transposed space; rotate
+        // back before anything user-visible (previews, final image).
+        let present = |img: &image::RgbaImage, horiz: bool| -> image::RgbaImage {
+            if horiz { image::imageops::rotate270(img) } else { img.clone() }
+        };
+
+        loop {
+            if state.lock().unwrap().should_stop.load(Ordering::SeqCst) {
+                // Grab whatever scrolled since the last frame so the tail isn't
+                // lost when the user hits Done right after a partial scroll.
+                let tail = moved_on_axis(monitor.accumulated_xy(), anchor_sum, horizontal) * scale;
+                if axis_chosen && tail >= min_stitch_px {
+                    if let Ok(raw) =
+                        ScreenCaptureService::capture_region_rgba(x, y, width, height)
+                    {
+                        let curr = if horizontal { image::imageops::rotate90(&raw) } else { raw };
+                        let overlap = (viewport - tail).max(0.0);
+                        if overlap >= 4.0 && Self::frames_differ(&prev_image, &curr) {
+                            if let Some(offset) = Self::tracked_offset(
+                                &prev_image,
+                                &curr,
+                                overlap.round() as u32,
+                                viewport,
+                            ) {
+                                let result = OffsetResult { offset, confidence: 0.95 };
+                                let _ = Self::stitch_frame(&mut stitched, &curr, &result);
+                                frame_count += 1;
+                            }
+                        }
+                    }
+                }
+                let out = present(&stitched, horizontal);
+                return Self::stop_requested(out, frame_count, state, app_handle);
+            }
+
+            // Auto-stop safety net (parity with the correlation path): finalize
+            // after a long idle once past the grace period.
+            if frame_count >= 2 {
+                let idle_ms = monitor.ms_since_last_event();
+                if let Ok(session_ms) = session_start.elapsed().map(|e| e.as_millis() as u64) {
+                    if session_ms >= GRACE_PERIOD_MS && idle_ms >= SETTLEMENT_DELAY_MS {
+                        println!("[scroll] auto-stop: idle {}ms, {} frames", idle_ms, frame_count);
+                        let out = present(&stitched, horizontal);
+                        return Self::finalize(out, state, app_handle);
+                    }
+                }
+            }
+
+            thread::sleep(Duration::from_millis(12));
+
+            let now_sum = monitor.accumulated_xy();
+
+            // ── Axis decision: first significant movement wins ──
+            if !axis_chosen {
+                let dy = (now_sum.0 - anchor_sum.0).abs();
+                let dx = (now_sum.1 - anchor_sum.1).abs();
+                if dy.max(dx) < AXIS_DECIDE_LOGICAL_PX {
+                    continue;
+                }
+                axis_chosen = true;
+                horizontal = dx > dy;
+                if horizontal {
+                    // Transpose the session into vertical space. No stitches have
+                    // happened yet (capturing requires a chosen axis), so both
+                    // buffers are still single viewport frames.
+                    stitched = image::imageops::rotate90(&stitched);
+                    prev_image = image::imageops::rotate90(&prev_image);
+                    viewport = prev_image.height() as f64; // = original width
+                    scale = viewport / width.max(1.0);
+                    capture_threshold = (viewport * 0.45).max(80.0);
+                    capture_hard_cap = viewport * 0.80;
+                    min_stitch_px = (viewport * 0.05).max(MIN_OFFSET_ABSOLUTE * scale);
+                }
+                println!(
+                    "[scroll] axis: {} (dy={:.0}, dx={:.0})",
+                    if horizontal { "HORIZONTAL" } else { "vertical" },
+                    dy, dx
+                );
+            }
+
+            let moved = moved_on_axis(now_sum, anchor_sum, horizontal) * scale; // physical px
+            let quiet_ms = monitor.ms_since_last_event();
+
+            // Capture policy (in order of preference):
+            //   1. Enough scrolled AND input briefly quiet (≥40ms) — the page's
+            //      smooth-scroll easing has (mostly) caught up with the input, so
+            //      the frame is settled and the predicted offset is accurate.
+            //   2. Hard cap: ~80% viewport passed and the user is STILL scrolling
+            //      (long fling) — capture mid-motion anyway; ≥20% overlap is
+            //      plenty for the seam search, and waiting would lose content.
+            //   3. User paused after a partial scroll — grab the remainder.
+            let should_capture = (moved >= capture_threshold && quiet_ms >= 40)
+                || moved >= capture_hard_cap
+                || (quiet_ms > 120 && moved >= min_stitch_px);
+            if !should_capture {
+                continue;
+            }
+
+            let curr = match ScreenCaptureService::capture_region_rgba(x, y, width, height) {
+                Ok(img) => {
+                    if horizontal { image::imageops::rotate90(&img) } else { img }
+                }
+                Err(_) => continue,
+            };
+            // Re-read AFTER the (few-ms) capture so the predicted offset matches
+            // the frame we actually grabbed.
+            let post_sum = monitor.accumulated_xy();
+            let moved_px = moved_on_axis(post_sum, anchor_sum, horizontal) * scale;
+
+            // Screen didn't actually change → at the bottom (rubber-band) or a
+            // non-scrolling delta. Re-baseline without stitching (avoids dupes).
+            if !Self::frames_differ(&prev_image, &curr) {
+                prev_image = curr;
+                anchor_sum = post_sum;
+                continue;
+            }
+
+            // Known overlap (rows shared) = viewport − scrolled.
+            let predicted_overlap = (viewport - moved_px).max(0.0);
+            if predicted_overlap < 4.0 {
+                // ~A full viewport scrolled between frames (extreme fling): almost
+                // no overlap to anchor on. Re-baseline and accept a tiny gap
+                // rather than risk a wrong stitch.
+                prev_image = curr;
+                anchor_sum = post_sum;
+                continue;
+            }
+
+            let hint = predicted_overlap.round() as u32;
+            match Self::tracked_offset(&prev_image, &curr, hint, viewport) {
+                Some(offset) => {
+                    let result = OffsetResult { offset, confidence: 0.95 };
+                    if let Err(e) = Self::stitch_frame(&mut stitched, &curr, &result) {
+                        eprintln!("[scroll] stitch stopped: {}", e);
+                        let out = present(&stitched, horizontal);
+                        return Self::finalize(out, state, app_handle);
+                    }
+                    prev_image = curr;
+                    anchor_sum = post_sum;
+                    frame_count += 1;
+                    // Previews/state always see the user-facing orientation.
+                    let shown = present(&stitched, horizontal);
+                    Self::sync_progress(
+                        &shown, frame_count, &state, &app_handle, &mut last_thumb,
+                        &mut last_clone,
+                    );
+                }
+                None => {
+                    // Content didn't actually move (bottom / rubber-band).
+                    // Re-baseline without stitching.
+                    prev_image = curr;
+                    anchor_sum = post_sum;
+                }
+            }
+        }
+    }
+
+    /// Decide the paste offset (overlap rows) for a tracked-mode frame.
+    ///
+    /// `hint` is the EXACT overlap predicted from the scroll-event tap. NCC only
+    /// REFINES it — it must never veto a real scroll (returning `None` ONLY when
+    /// the content genuinely didn't move, i.e. at the bottom / rubber-banding).
+    /// When NCC can't correlate (uniform content, motion mid-ease), we fall back
+    /// to the tap's exact offset and stitch anyway — that's the whole point of
+    /// having a ground-truth offset, and skipping here is what dropped a segment.
+    fn tracked_offset(
+        prev: &image::RgbaImage,
+        curr: &image::RgbaImage,
+        hint: u32,
+        viewport: f64,
+    ) -> Option<u32> {
+        // Narrow refine around the exact prediction.
+        let narrow = Self::detect_offset_ncc(prev, curr, Some(hint));
+        let sane = (viewport * 0.25) as i64;
+        if narrow.confidence >= 0.7 && (narrow.offset as i64 - hint as i64).abs() <= sane {
+            return Some(narrow.offset);
+        }
+        // Narrow couldn't confirm — was there any real movement? Full search.
+        let full = Self::detect_offset_ncc(prev, curr, None);
+        if full.confidence >= 0.75 && (full.offset as f64) >= viewport * 0.92 {
+            // Confident that overlap ≈ a full viewport ⇒ content didn't move.
+            return None;
+        }
+        // Lowe's-ratio inside detect_offset_ncc already collapses confidence on
+        // ambiguous/repetitive content, so a confident full-range match is the
+        // measured truth — prefer it over the input-derived hint even when they
+        // disagree (heavy easing means content genuinely lags the input).
+        if full.confidence >= 0.75 {
+            return Some(full.offset);
+        }
+        if full.confidence >= 0.7
+            && (full.offset as i64 - hint as i64).abs() <= (viewport * 0.4) as i64
+        {
+            return Some(full.offset);
+        }
+        // Can't correlate (uniform/blank content) — trust the exact tap offset.
+        Some(hint)
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -1290,6 +1580,10 @@ impl ScrollCaptureService {
     ) -> Result<Option<(Vec<u8>, u32, u32)>> {
         use std::borrow::Cow;
 
+        // The capture session is over — release the global Esc shortcut (the
+        // auto-stop path doesn't go through any frontend command that would).
+        crate::commands::scroll_capture::unregister_scroll_esc(&app_handle);
+
         let (width, height) = stitched.dimensions();
         let already_finalized = state
             .lock()
@@ -1421,10 +1715,11 @@ impl ScrollCaptureService {
             image::imageops::FilterType::Triangle,
         );
 
-        // JPEG q70: ~5× smaller payload than PNG, ~10× faster to encode.
+        // JPEG q80: much smaller/faster than PNG, and q80 keeps small text in
+        // the preview legible now that it renders pixel-sharp at 2×.
         let rgb = image::DynamicImage::ImageRgba8(thumb).to_rgb8();
         let mut bytes = Vec::new();
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 70);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 80);
         if encoder.encode_image(&rgb).is_err() { return; }
         let thumbnail = base64::engine::general_purpose::STANDARD.encode(&bytes);
 

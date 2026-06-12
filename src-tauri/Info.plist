@@ -6,5 +6,7 @@
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
     <string>iShot needs screen recording permission to capture screenshots.</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>iShot reads your scroll movements so scrolling screenshots stitch together accurately. It only listens while you capture — it never types or controls anything.</string>
 </dict>
 </plist>

@@ -1,9 +1,37 @@
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 use crate::services::accessibility::check_accessibility;
 use crate::services::scroll_capture::{
     AutoScrollConfig, ScrollCaptureService, ScrollCaptureState, ScrollCaptureResult,
 };
+
+/// Esc must work GLOBALLY while a scroll capture runs: the user scrolls (and
+/// often clicks into) the target window, which takes focus away from the scroll
+/// panel — its webview `keydown` listener then never fires and the session
+/// can't be finished. A global shortcut catches Esc regardless of focus; the
+/// handler just emits `scroll-esc` and the panel runs its normal finish flow.
+fn esc_shortcut() -> Shortcut {
+    Shortcut::new(None, Code::Escape)
+}
+
+pub fn register_scroll_esc(app: &AppHandle) {
+    let app2 = app.clone();
+    if let Err(e) = app
+        .global_shortcut()
+        .on_shortcut(esc_shortcut(), move |_app, _sc, event| {
+            if event.state == ShortcutState::Pressed {
+                let _ = app2.emit("scroll-esc", ());
+            }
+        })
+    {
+        eprintln!("[scroll] esc shortcut register failed: {}", e);
+    }
+}
+
+pub fn unregister_scroll_esc(app: &AppHandle) {
+    let _ = app.global_shortcut().unregister(esc_shortcut());
+}
 
 /// Prepare scroll capture: store the selection rect so the scroll panel can start later
 #[tauri::command]
@@ -33,6 +61,7 @@ pub async fn start_scroll_capture(
     };
     let state_clone = state.inner().clone();
     let app_emit = app.clone();
+    register_scroll_esc(&app);
 
     // Spawn capture in background thread
     std::thread::spawn(move || {
@@ -89,6 +118,7 @@ pub async fn start_auto_scroll_capture(
     };
     let state_clone = state.inner().clone();
     let app_emit = app.clone();
+    register_scroll_esc(&app);
 
     std::thread::spawn(move || {
         match ScrollCaptureService::start_auto_capture(
@@ -112,8 +142,10 @@ pub async fn start_auto_scroll_capture(
 /// Stop scroll capture and return result
 #[tauri::command]
 pub async fn stop_scroll_capture(
+    app: AppHandle,
     state: State<'_, Arc<Mutex<ScrollCaptureState>>>,
 ) -> std::result::Result<Option<ScrollCaptureResult>, String> {
+    unregister_scroll_esc(&app);
     ScrollCaptureService::stop_capture(state.inner().clone())
         .map_err(|e| e.to_string())
 }
@@ -141,12 +173,14 @@ pub struct ScrollFinalizeResult {
 /// just locks state, takes the image, sets it on the clipboard. ~15-30 ms.
 #[tauri::command]
 pub async fn finalize_scroll_to_clipboard(
+    app: AppHandle,
     state: State<'_, Arc<Mutex<ScrollCaptureState>>>,
 ) -> std::result::Result<Option<ScrollFinalizeResult>, String> {
     use std::borrow::Cow;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
+    unregister_scroll_esc(&app);
     let t0 = Instant::now();
 
     // Step 1: signal the capture loop to stop AND claim the externally-
@@ -204,8 +238,10 @@ pub async fn finalize_scroll_to_clipboard(
 /// Cancel scroll capture without saving
 #[tauri::command]
 pub async fn cancel_scroll_capture(
+    app: AppHandle,
     state: State<'_, Arc<Mutex<ScrollCaptureState>>>,
 ) -> std::result::Result<(), String> {
+    unregister_scroll_esc(&app);
     ScrollCaptureService::cancel_capture(state.inner().clone());
     Ok(())
 }

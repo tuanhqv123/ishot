@@ -47,7 +47,9 @@
         user-select: none;
       }
       .preview-img.show { display: block; }
-      /* Placeholder pill, shown only before the first frame arrives. */
+      /* Placeholder message, shown only before the first frame arrives.
+         Plain floating text — no pill/box behind it; the text-shadow alone
+         keeps it readable over any background. */
       .placeholder {
         display: flex;
         align-items: center;
@@ -59,49 +61,34 @@
         color: var(--text);
         padding: 14px 18px;
         text-shadow: 0 2px 6px rgba(0, 0, 0, 0.85);
-        background: rgba(0, 0, 0, 0.32);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-        border-radius: 10px;
         transition: opacity 200ms ease;
       }
       .placeholder.hidden { display: none; }
       .placeholder .icon { display: block; margin-bottom: 8px; font-size: 22px; line-height: 1; }
       .placeholder.warn { color: var(--warn); }
-      /* Subtle Esc hint along the bottom of the panel. Only visible after the
-         first frame has been captured (panel switches from placeholder to
-         actual preview). */
+      /* Plain-text Esc hint under the preview image — no box, no frame.
+         Hidden until the first frame arrives (the placeholder covers it
+         before that). */
       .esc-hint {
-        margin-top: 8px;
+        display: none;
+        margin-top: 6px;
         text-align: center;
         font-size: 10.5px;
-        color: rgba(255, 255, 255, 0.85);
-        letter-spacing: 0.02em;
         font-weight: 500;
-        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+        letter-spacing: 0.02em;
+        color: rgba(255, 255, 255, 0.9);
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
       }
-      .esc-hint kbd {
-        background: rgba(0, 0, 0, 0.55);
-        color: #fff;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-family: inherit;
-        font-size: 10px;
-        font-weight: 600;
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
-      }
+      .esc-hint.show { display: block; }
     </style>
   </head>
   <body>
     <div class="panel">
       <img id="thumb" class="preview-img" alt="" draggable="false" />
+      <div class="esc-hint" id="escHint">Press Esc to finish</div>
       <div class="placeholder" id="msg">
-        <div>
-          <span class="icon">↓</span>
-          Scroll the page<br />to capture
-        </div>
+        <div>Scroll down or right, steadily</div>
       </div>
-      <div class="esc-hint">Press <kbd>Esc</kbd> to finish</div>
     </div>
 
     <script>
@@ -142,6 +129,21 @@
         }
       }
 
+      // Pre-capture hints, one at a time: the scroll hint for the first 3s,
+      // then "Press Esc to finish" — once, no looping. Stops at the first frame.
+      const HINTS = ["Scroll down or right, steadily", "Press Esc to finish"];
+      let hintIdx = 0;
+      setTimeout(() => {
+        if (gotFirstFrame || msgEl.classList.contains("warn")) return;
+        hintIdx = 1;
+        msgEl.style.opacity = "0";
+        setTimeout(() => {
+          if (gotFirstFrame) return;
+          msgEl.innerHTML = "<div>" + HINTS[1] + "</div>";
+          msgEl.style.opacity = "1";
+        }, 200);
+      }, 3000);
+
       // Esc anywhere = finish (Shottr-style). No buttons, no status row,
       // no frame count — just the preview + this one keystroke.
       window.addEventListener("keydown", (e) => {
@@ -150,6 +152,10 @@
           finish();
         }
       });
+      // Esc pressed while ANOTHER window has focus (user clicked into the page
+      // they're scrolling): the webview keydown above never fires, so Rust
+      // registers a global Esc shortcut for the session and relays it here.
+      T.event.listen("scroll-esc", () => finish());
 
       T.event.listen("scroll-capture-progress", (ev) => {
         const p = ev.payload;
@@ -158,6 +164,7 @@
           if (!gotFirstFrame) {
             gotFirstFrame = true;
             thumbEl.classList.add("show");
+            document.getElementById("escHint").classList.add("show");
             hideMessage();
           }
         }
@@ -171,7 +178,13 @@
           );
           if (warnTimer) clearTimeout(warnTimer);
           warnTimer = setTimeout(() => {
-            if (gotFirstFrame) hideMessage();
+            if (gotFirstFrame) {
+              hideMessage();
+            } else {
+              // Back to the rotating hints (don't stay stuck on the warning).
+              msgEl.classList.remove("warn");
+              msgEl.innerHTML = "<div>" + HINTS[hintIdx] + "</div>";
+            }
           }, 2200);
         }
       });

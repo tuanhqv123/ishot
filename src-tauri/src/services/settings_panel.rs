@@ -94,6 +94,26 @@ pub fn build(app: &AppHandle) {
     }
 }
 
+/// Ensure the settings panel is shown (build it if needed). Unlike `toggle`,
+/// this never hides — used when another flow (e.g. AI chat with no API key)
+/// needs to send the user straight to Settings.
+pub fn show(app: &AppHandle) {
+    let panel = match app.get_webview_panel(PANEL_LABEL) {
+        Ok(p) => p,
+        Err(_) => {
+            build(app);
+            match app.get_webview_panel(PANEL_LABEL) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[settings_panel] show failed: {:?}", e);
+                    return;
+                }
+            }
+        }
+    };
+    panel.show_and_make_key();
+}
+
 pub fn toggle(app: &AppHandle) {
     let panel = match app.get_webview_panel(PANEL_LABEL) {
         Ok(p) => p,

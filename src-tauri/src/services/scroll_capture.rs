@@ -644,7 +644,10 @@ impl ScrollCaptureService {
             //   medium (40–70%):        regular scroll — 70ms sleep
             //   fast   (< 40%):         fling / fast scroll — 30ms sleep to catch up
             let mut active_no_change = 0u32;
-            let mut consecutive_too_fast = 0u32;
+            // Frames that changed but couldn't be aligned (trackpad mid-momentum
+            // blur / velocity spikes). We HOLD the baseline through these so the
+            // offset accumulates, instead of bailing immediately.
+            let mut unaligned = 0u32;
             let mut last_overlap_ratio: f32 = 1.0;
             // Last accepted offset — used as the NARROW-search hint for the next
             // frame so alignment stays cheap during continuous scrolling.
@@ -721,25 +724,33 @@ impl ScrollCaptureService {
                     .max(MIN_OFFSET_ABSOLUTE);
 
                 if offset_result.confidence < 0.7 || (offset_result.offset as f64) < min_off {
-                    // Couldn't lock onto an offset. Two reasons:
-                    //   1. Scroll has stopped (consecutive_no_change rises)
-                    //   2. User scrolled so fast the frames don't overlap → content lost
-                    //      Warn the user so they slow down for the next section.
-                    consecutive_too_fast += 1;
-                    if consecutive_too_fast >= 2 {
+                    // Frame changed but we couldn't lock an offset. On a TRACKPAD
+                    // this is usually a transient mid-momentum frame (smooth-scroll
+                    // blur or a velocity spike), NOT real content loss — bailing
+                    // here (the old behavior) is what broke trackpad capture.
+                    //
+                    // So HOLD the baseline (do NOT advance prev_image): the offset
+                    // keeps accumulating, and as soon as the scroll settles a touch,
+                    // the full-range search locks onto the whole jump and stitches
+                    // it cleanly. Only give up after MANY misses — that means the
+                    // scroll truly stopped, or the jump exceeded one viewport.
+                    unaligned += 1;
+                    // Warn only if it persists, so a normal trackpad swipe doesn't
+                    // trigger a false "too fast".
+                    if unaligned == 5 {
                         let _ = app_handle.emit("scroll-capture-warning", "scroll-too-fast");
                     }
-                    active_no_change += 1;
-                    if active_no_change >= 2 {
-                        println!("[scroll] scroll stopped (offset too small)");
+                    if unaligned >= 8 {
+                        println!("[scroll] active phase ended (unaligned x{})", unaligned);
                         rollback_weak_tail(&mut stitched, pre_stitch_height, last_stitch_conf);
                         prev_image = next_image;
                         break;
                     }
-                    prev_image = next_image;
+                    // NOTE: prev_image is intentionally NOT advanced — hold the
+                    // baseline so the offset accumulates across the burst.
                     continue;
                 }
-                consecutive_too_fast = 0;
+                unaligned = 0;
 
                 // Record overlap ratio for the next sleep decision + the offset
                 // as the next frame's narrow-search hint.

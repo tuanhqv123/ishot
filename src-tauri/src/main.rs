@@ -615,6 +615,7 @@ fn main() {
             commands::settings::has_api_key,
             commands::settings::set_api_key,
             commands::settings::clear_api_key,
+            commands::settings::open_settings,
             commands::ai_chat::ai_chat_stream,
             commands::ai_chat::list_ai_models,
         ])

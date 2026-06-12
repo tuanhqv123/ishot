@@ -7,7 +7,20 @@
 
 use tauri::{AppHandle, Emitter};
 
-use crate::services::{keychain, settings};
+use crate::services::{keychain, settings, settings_panel};
+
+/// Open the Settings panel (build if needed). Called e.g. when the user tries
+/// AI chat without an API key — we send them straight here.
+///
+/// NSPanel build/show MUST happen on the main (UI) thread. This command is
+/// `async`, so it runs on a tokio worker thread — calling AppKit from there
+/// crashes the app. Hop to the main thread before touching the panel.
+#[tauri::command]
+pub async fn open_settings(app: AppHandle) -> Result<(), String> {
+    let app2 = app.clone();
+    app.run_on_main_thread(move || settings_panel::show(&app2))
+        .map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 pub async fn get_settings() -> settings::Settings {

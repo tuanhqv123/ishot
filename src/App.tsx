@@ -665,6 +665,20 @@ function App() {
 			closeAiPanel();
 			return;
 		}
+		// No API key yet → don't open an empty chat that immediately errors.
+		// Nudge the user with a notification and send them to Settings.
+		const hasKey = await invoke<boolean>("has_api_key").catch(() => false);
+		if (!hasKey) {
+			new Notification("AI needs a key", {
+				body: "Drop your API key in Settings and we're good to go.",
+			});
+			// Tear down the capture overlay first — otherwise it stays up
+			// covering the screen and the user has to hit Esc to even see the
+			// notification / Settings panel.
+			await cancelCapture();
+			await invoke("open_settings").catch(() => {});
+			return;
+		}
 		closeTranslatePanel();
 		exitScrollReady();
 		setTool(null);
@@ -724,6 +738,7 @@ function App() {
 		closeAiPanel,
 		closeTranslatePanel,
 		exitScrollReady,
+		cancelCapture,
 	]);
 
 	const sendAiPrompt = useCallback(async () => {

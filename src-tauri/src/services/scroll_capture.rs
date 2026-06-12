@@ -561,13 +561,12 @@ impl ScrollCaptureService {
 
         // Scroll capture reads the user's exact scroll offsets via a listen-only
         // event tap — that's the whole algorithm, so Input Monitoring is
-        // REQUIRED. No permission → no degraded guess-mode: prompt, open the
-        // exact Settings pane, tell the user in the panel, and end the session.
+        // REQUIRED. No permission → no degraded guess-mode: system notification
+        // with instructions + Settings opened at the right pane, session ends.
         if !crate::services::scroll_events::has_input_monitoring() {
             println!("[scroll] Input Monitoring not granted — guiding user to Settings");
             crate::services::scroll_events::request_input_monitoring();
-            crate::services::scroll_events::open_input_monitoring_settings();
-            let _ = app_handle.emit("scroll-capture-permission", "needs-input-monitoring");
+            Self::permission_guidance(&app_handle, false);
             let mut s = state.lock().unwrap();
             s.is_capturing = false;
             s.stitched_image = None;
@@ -579,8 +578,7 @@ impl ScrollCaptureService {
             // entry is stale (e.g. belongs to a differently-signed build of the
             // same bundle id). The fix is a re-grant + relaunch.
             println!("[scroll] tap creation failed despite grant — stale TCC entry");
-            crate::services::scroll_events::open_input_monitoring_settings();
-            let _ = app_handle.emit("scroll-capture-permission", "stale-input-monitoring");
+            Self::permission_guidance(&app_handle, true);
             let mut s = state.lock().unwrap();
             s.is_capturing = false;
             s.stitched_image = None;
@@ -602,14 +600,45 @@ impl ScrollCaptureService {
                 // Tap created fine but went DEAF: screen scrolls, zero events.
                 // Same stale-TCC disease, same cure — re-grant + relaunch.
                 println!("[scroll] tap is DEAF (screen scrolls, no events) — stale TCC entry");
-                crate::services::scroll_events::open_input_monitoring_settings();
-                let _ = app_handle.emit("scroll-capture-permission", "stale-input-monitoring");
+                Self::permission_guidance(&app_handle, true);
                 let mut s = state.lock().unwrap();
                 s.is_capturing = false;
                 s.stitched_image = None;
                 Ok(None)
             }
         }
+    }
+
+    /// Walk the user through granting Input Monitoring.
+    ///
+    /// Goes through a SYSTEM notification on purpose (not the in-app HUD): the
+    /// user is about to work inside System Settings, and a notification stays
+    /// available in Notification Center while they do — a transient HUD would
+    /// have faded before they finish. Also opens Settings at the exact pane and
+    /// tears down the capture UI (border + panel) so nothing dims the screen.
+    fn permission_guidance(app_handle: &tauri::AppHandle, stale: bool) {
+        use tauri_plugin_notification::NotificationExt;
+
+        crate::commands::scroll_capture::unregister_scroll_esc(app_handle);
+        crate::services::scroll_events::open_input_monitoring_settings();
+
+        let body = if stale {
+            "Permission needs a refresh: remove and re-add iShot under Input Monitoring, then relaunch iShot."
+        } else {
+            "Turn on iShot under Privacy & Security → Input Monitoring, then relaunch iShot."
+        };
+        let _ = app_handle
+            .notification()
+            .builder()
+            .title("Scroll capture needs Input Monitoring")
+            .body(body)
+            .show();
+
+        if let Some(border) = app_handle.get_webview_window("scroll_border") {
+            let _ = border.close();
+        }
+        // The panel closes itself on this event.
+        let _ = app_handle.emit("scroll-capture-error", "input-monitoring");
     }
 
     /// Capture loop driven by the EXACT scroll offset from a `ScrollMonitor`
@@ -1452,7 +1481,13 @@ impl ScrollCaptureService {
                 bytes: Cow::from(raw),
             };
             match arboard::Clipboard::new().and_then(|mut cb| cb.set_image(image_data)) {
-                Ok(_) => println!("[scroll] auto-stop: copied {}×{} to clipboard", width, height),
+                Ok(_) => {
+                    println!("[scroll] auto-stop: copied {}×{} to clipboard", width, height);
+                    crate::services::hud::show(
+                        &app_handle,
+                        &format!("Saved {}×{} — copied to clipboard", width, height),
+                    );
+                }
                 Err(e) => eprintln!("[scroll] auto-stop: clipboard write failed: {}", e),
             }
         } else {

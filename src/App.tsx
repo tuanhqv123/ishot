@@ -1264,14 +1264,8 @@ function App() {
 	// while the panel is still in its pre-Start ready state.
 	const handleScrollFinalize = useCallback(async () => {
 		try {
-			const result = await invoke<{ width: number; height: number } | null>(
-				"finalize_scroll_to_clipboard",
-			);
-			if (result) {
-				new Notification("iShot", {
-					body: `Scroll capture saved (${result.width}x${result.height})`,
-				});
-			}
+			// Rust shows the saved-confirmation HUD pill itself.
+			await invoke("finalize_scroll_to_clipboard");
 		} catch (e) {
 			console.error("[scroll] finalize failed:", e);
 		}

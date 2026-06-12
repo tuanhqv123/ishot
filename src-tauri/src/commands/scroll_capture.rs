@@ -232,6 +232,12 @@ pub async fn finalize_scroll_to_clipboard(
         width, height, t0.elapsed(), t_extract
     );
 
+    // Confirmation as the in-app HUD pill, not a Notification Center banner.
+    crate::services::hud::show(
+        &app,
+        &format!("Saved {}×{} — copied to clipboard", width, height),
+    );
+
     Ok(Some(ScrollFinalizeResult { width, height }))
 }
 

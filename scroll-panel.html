@@ -119,8 +119,8 @@
       // FINISH = stop capture + copy result to clipboard.
       async function finish() {
         try {
-          const r = await T.core.invoke("finalize_scroll_to_clipboard");
-          if (r) new Notification("iShot", { body: `Saved ${r.width}×${r.height}` });
+          // Rust shows the saved-confirmation HUD pill itself.
+          await T.core.invoke("finalize_scroll_to_clipboard");
         } catch (e) {
           console.error(e);
         } finally {
@@ -133,34 +133,16 @@
       // then "Press Esc to finish" — once, no looping. Stops at the first frame.
       const HINTS = ["Scroll down or right, steadily", "Press Esc to finish"];
       let hintIdx = 0;
-      let permMsg = false; // a permission message owns the panel — don't overwrite
       setTimeout(() => {
-        if (gotFirstFrame || permMsg || msgEl.classList.contains("warn")) return;
+        if (gotFirstFrame || msgEl.classList.contains("warn")) return;
         hintIdx = 1;
         msgEl.style.opacity = "0";
         setTimeout(() => {
-          if (gotFirstFrame || permMsg) return;
+          if (gotFirstFrame) return;
           msgEl.innerHTML = "<div>" + HINTS[1] + "</div>";
           msgEl.style.opacity = "1";
         }, 200);
       }, 3000);
-
-      // Backend ended the session because Input Monitoring is missing or its
-      // TCC entry is stale. System Settings has already been opened at the
-      // right pane — explain what to flip and how to come back.
-      T.event.listen("scroll-capture-permission", (ev) => {
-        permMsg = true;
-        const stale = ev.payload === "stale-input-monitoring";
-        const txt = stale
-          ? "Permission needs a refresh:<br>remove &amp; re-add iShot under<br>Input Monitoring, then relaunch"
-          : "Turn on Input Monitoring<br>for iShot in System Settings,<br>then relaunch iShot";
-        setMessage("<div>" + txt + "</div>", "warn");
-        thumbEl.classList.remove("show");
-        document.getElementById("escHint").classList.remove("show");
-        // Drop the dim/border overlay right away — the user is about to work
-        // in System Settings and shouldn't have a dimmed screen in the way.
-        T.core.invoke("hide_scroll_border").catch(() => {});
-      });
 
       // Esc anywhere = finish (Shottr-style). No buttons, no status row,
       // no frame count — just the preview + this one keystroke.
@@ -207,12 +189,9 @@
         }
       });
 
-      T.event.listen("scroll-capture-result", (ev) => {
+      T.event.listen("scroll-capture-result", () => {
+        // Rust shows the saved-confirmation HUD pill itself.
         if (cleaned) return;
-        const d = ev.payload || {};
-        if (d.width && d.height) {
-          new Notification("iShot", { body: `Saved ${d.width}×${d.height}` });
-        }
         cleanup();
       });
 

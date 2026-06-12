@@ -279,17 +279,11 @@ fn shortcut_to_display(shortcut: &Shortcut) -> String {
 /// being silently swallowed.
 async fn check_for_updates(app: tauri::AppHandle) {
     use tauri_plugin_updater::UpdaterExt;
-    use tauri_plugin_notification::NotificationExt;
 
-    // Helper closure so each branch can fire a notification without repeating
-    // the title + summary key.
+    // Update status shows as the in-app HUD pill (bottom-center, auto-fades)
+    // instead of a Notification Center banner stuck in the top-right corner.
     let notify = |body: &str| {
-        let _ = app
-            .notification()
-            .builder()
-            .title("iShot")
-            .body(body)
-            .show();
+        services::hud::show(&app, body);
     };
 
     let updater = match app.updater() {

@@ -16,6 +16,7 @@ export default defineConfig(async () => ({
 				recorder: path.resolve(__dirname, "recorder.html"),
 				"scroll-panel": path.resolve(__dirname, "scroll-panel.html"),
 				"scroll-border": path.resolve(__dirname, "scroll-border.html"),
+				hud: path.resolve(__dirname, "hud.html"),
 				"clipboard-history": path.resolve(__dirname, "clipboard-history.html"),
 				settings: path.resolve(__dirname, "settings.html"),
 			},

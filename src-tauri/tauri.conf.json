@@ -50,6 +50,9 @@
     "active": true,
     "targets": ["dmg", "app"],
     "createUpdaterArtifacts": true,
+    "publisher": "Tuan Tran",
+    "copyright": "© 2026 Tuan Tran · tuantrungvuongk62@gmail.com",
+    "homepage": "https://ishot-landingpage.vercel.app",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -62,7 +65,7 @@
     "macOS": {
       "minimumSystemVersion": "10.15",
       "entitlements": "./entitlements.plist",
-      "signingIdentity": "iShot Developer",
+      "signingIdentity": "Developer ID Application: Nguyen Manh Hau (JVRZQDRZ26)",
       "dmg": {
         "appPosition": { "x": 180, "y": 170 },
         "applicationFolderPosition": { "x": 480, "y": 170 },

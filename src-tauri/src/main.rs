@@ -27,6 +27,12 @@ use cocoa::base::id;
 #[macro_use]
 extern crate objc;
 
+// Non-activating panel for the capture overlay lives in its own module: its
+// macro pulls in objc2 types (NSWindow/msg_send) that would collide with the
+// cocoa/objc used throughout this file.
+#[cfg(target_os = "macos")]
+mod overlay_panel;
+
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
     modifiers: u32,
@@ -171,6 +177,11 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
             unsafe { ns_win.setAcceptsMouseMovedEvents_(objc::runtime::YES); }
         }
 
+        // Force the (now non-activating panel) overlay onto the active Space and
+        // above fullscreen content — needed when an app is in native fullscreen.
+        #[cfg(target_os = "macos")]
+        order_overlay_over_fullscreen(&overlay);
+
         // Activate the application so the webview's CSS `cursor: crosshair`
         // takes effect immediately. Without activating, iShot is a background
         // menu-bar app (LSUIElement=true) and macOS routes cursor control to
@@ -200,6 +211,8 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
             ));
             let _ = existing.set_size(tauri::Size::Logical(tauri::LogicalSize::new(m.width, m.height)));
             let _ = existing.show();
+            #[cfg(target_os = "macos")]
+            order_overlay_over_fullscreen(&existing);
             continue;
         }
         let builder = tauri::WebviewWindowBuilder::new(
@@ -214,7 +227,11 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
         .always_on_top(true)
         .resizable(false)
         .visible(false)
-        .focused(false);
+        .focused(false)
+        // First click registers even when the panel isn't active — without
+        // this, over a fullscreen app the first click only woke the panel and a
+        // second was needed to actually select.
+        .accept_first_mouse(true);
 
         match builder.build() {
             Ok(win) => {
@@ -222,19 +239,28 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
                     tauri::LogicalPosition::new(m.x, m.y),
                 ));
                 #[cfg(target_os = "macos")]
-                #[allow(deprecated)]
-                if let Ok(ns_ptr) = win.ns_window() {
-                    let ns_win = ns_ptr as id;
-                    unsafe {
-                        ns_win.setLevel_(1000);
-                        ns_win.setCollectionBehavior_(
-                            NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
-                            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
-                        );
-                        ns_win.setAcceptsMouseMovedEvents_(objc::runtime::YES);
+                {
+                    // Same as the primary overlay: convert to a non-activating
+                    // panel so this monitor's overlay can also appear over a
+                    // fullscreen app on it.
+                    overlay_panel::convert(&win);
+                    #[allow(deprecated)]
+                    if let Ok(ns_ptr) = win.ns_window() {
+                        let ns_win = ns_ptr as id;
+                        unsafe {
+                            ns_win.setLevel_(1000);
+                            ns_win.setCollectionBehavior_(
+                                NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
+                                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
+                            );
+                            ns_win.setAcceptsMouseMovedEvents_(objc::runtime::YES);
+                        }
                     }
                 }
                 let _ = win.show();
+                #[cfg(target_os = "macos")]
+                order_overlay_over_fullscreen(&win);
                 println!("[overlay_{}] created at ({},{} {}x{})", i, m.x, m.y, m.width, m.height);
             }
             Err(e) => eprintln!("[overlay_{}] failed: {}", i, e),
@@ -402,6 +428,29 @@ fn main() {
                             let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
                             let _: () = msg_send![ns_window, setFrame:frame display:true];
                         }
+                    }
+
+                    // Convert to a non-activating panel + allow joining the
+                    // active fullscreen Space. After this, the existing
+                    // overlay.show()/hide() keep working but no longer activate
+                    // iShot, so the overlay can appear over a fullscreen app.
+                    #[cfg(target_os = "macos")]
+                    if overlay_panel::convert(&overlay) {
+                        #[allow(deprecated)]
+                        if let Ok(ns_ptr) = overlay.ns_window() {
+                            let ns_window = ns_ptr as id;
+                            unsafe {
+                                ns_window.setLevel_(1000);
+                                ns_window.setCollectionBehavior_(
+                                    NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
+                                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
+                                );
+                            }
+                        }
+                        println!("[overlay] non-activating panel ready (over-fullscreen capable)");
+                    } else {
+                        eprintln!("[overlay] to_panel failed — staying a plain window");
                     }
                 }
             }
@@ -655,6 +704,44 @@ fn str_to_code(s: &str) -> Code {
 extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
+    /// Security-shield level — above normal AND fullscreen content. Computed at
+    /// runtime. The reliable level for an overlay that must sit over a
+    /// fullscreen app.
+    fn CGShieldingWindowLevel() -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn overlay_window_level() -> i64 {
+    unsafe { CGShieldingWindowLevel() as i64 }
+}
+
+/// Order an overlay panel onto the active Space (incl. another app's fullscreen)
+/// and above its content. Re-asserts collection behavior + level every show:
+/// `orderFrontRegardless` is required because iShot is an inactive (Accessory)
+/// app — plain `show()`/`orderFront` is ignored, leaving the overlay off the
+/// active fullscreen Space.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn order_overlay_over_fullscreen(window: &tauri::WebviewWindow) {
+    if let Ok(ns_ptr) = window.ns_window() {
+        let ns_win = ns_ptr as id;
+        unsafe {
+            // Ensure the NON-ACTIVATING PANEL style bit is set. The tauri_panel
+            // config (can_become_key_window etc.) may not actually set the
+            // styleMask bit, and without it the panel still activates → can't
+            // join a fullscreen Space. 1<<7 = NSWindowStyleMaskNonactivatingPanel.
+            let style: u64 = msg_send![ns_win, styleMask];
+            let _: () = msg_send![ns_win, setStyleMask: style | (1u64 << 7)];
+
+            ns_win.setCollectionBehavior_(
+                NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
+                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
+            );
+            ns_win.setLevel_(overlay_window_level());
+            let _: () = msg_send![ns_win, orderFrontRegardless];
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

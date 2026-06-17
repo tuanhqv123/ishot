@@ -22,13 +22,12 @@ use core_graphics::geometry::CGPoint;
 // Max scroll capture height (like Shottr)
 const MAX_SCROLL_HEIGHT: u32 = 20000;
 
-// Capture interval range (adaptive)
+// Legacy capture-interval constants. The exact-offset tracked loop is driven
+// by scroll DISTANCE, not these time intervals, so they're only kept as sanity
+// references for tests. (Retained over deletion to avoid churning the tests.)
+#[allow(dead_code)]
 const CAPTURE_INTERVAL_FAST_MS: u64 = 70;
-// Idle poll: how often we look for the START of a scroll. Must be SHORT —
-// at 250ms a medium-fast scroll moved most of a viewport before we noticed,
-// so the first frame had little overlap and the chunk got dropped (the "mất
-// nhiều phần" the user saw). 60ms catches the scroll start with overlap
-// intact; capturing a static screen at ~16fps is cheap.
+#[allow(dead_code)]
 const CAPTURE_INTERVAL_DEFAULT_MS: u64 = 60;
 
 // Auto-stop kicks in after the user appears done. Numbers tuned so a typical
@@ -559,26 +558,16 @@ impl ScrollCaptureService {
 
         let mut frame_count: u32 = 1;
 
-        // Scroll capture reads the user's exact scroll offsets via a listen-only
-        // event tap — that's the whole algorithm, so Input Monitoring is
-        // REQUIRED. No permission → no degraded guess-mode: system notification
-        // with instructions + Settings opened at the right pane, session ends.
-        if !crate::services::scroll_events::has_input_monitoring() {
-            println!("[scroll] Input Monitoring not granted — guiding user to Settings");
-            crate::services::scroll_events::request_input_monitoring();
-            Self::permission_guidance(&app_handle, false);
-            let mut s = state.lock().unwrap();
-            s.is_capturing = false;
-            s.stitched_image = None;
-            return Ok(None);
-        }
-
+        // A listen-only tap on scroll-ONLY events needs no TCC permission (Input
+        // Monitoring gates keyboard taps, not scroll). So just start it — no
+        // prompt, no Settings trip. If creation genuinely fails (very rare), end
+        // the session cleanly instead of hanging.
         let Some(monitor) = crate::services::scroll_events::ScrollMonitor::start() else {
-            // Preflight said granted but the tap couldn't be created — the TCC
-            // entry is stale (e.g. belongs to a differently-signed build of the
-            // same bundle id). The fix is a re-grant + relaunch.
-            println!("[scroll] tap creation failed despite grant — stale TCC entry");
-            Self::permission_guidance(&app_handle, true);
+            println!("[scroll] scroll-event tap could not be created");
+            let _ = app_handle.emit("scroll-capture-error", "tap-failed");
+            if let Some(border) = app_handle.get_webview_window("scroll_border") {
+                let _ = border.close();
+            }
             let mut s = state.lock().unwrap();
             s.is_capturing = false;
             s.stitched_image = None;
@@ -596,49 +585,10 @@ impl ScrollCaptureService {
             &mut frame_count,
         ) {
             Some(result) => result,
-            None => {
-                // Tap created fine but went DEAF: screen scrolls, zero events.
-                // Same stale-TCC disease, same cure — re-grant + relaunch.
-                println!("[scroll] tap is DEAF (screen scrolls, no events) — stale TCC entry");
-                Self::permission_guidance(&app_handle, true);
-                let mut s = state.lock().unwrap();
-                s.is_capturing = false;
-                s.stitched_image = None;
-                Ok(None)
-            }
+            // No events ever arrived (shouldn't happen now that no permission is
+            // needed) — finalize with whatever we captured rather than hang.
+            None => Self::finalize(stitched, state, app_handle),
         }
-    }
-
-    /// Walk the user through granting Input Monitoring.
-    ///
-    /// Goes through a SYSTEM notification on purpose (not the in-app HUD): the
-    /// user is about to work inside System Settings, and a notification stays
-    /// available in Notification Center while they do — a transient HUD would
-    /// have faded before they finish. Also opens Settings at the exact pane and
-    /// tears down the capture UI (border + panel) so nothing dims the screen.
-    fn permission_guidance(app_handle: &tauri::AppHandle, stale: bool) {
-        use tauri_plugin_notification::NotificationExt;
-
-        crate::commands::scroll_capture::unregister_scroll_esc(app_handle);
-        crate::services::scroll_events::open_input_monitoring_settings();
-
-        let body = if stale {
-            "Permission needs a refresh: remove and re-add iShot under Input Monitoring, then relaunch iShot."
-        } else {
-            "Turn on iShot under Privacy & Security → Input Monitoring, then relaunch iShot."
-        };
-        let _ = app_handle
-            .notification()
-            .builder()
-            .title("Scroll capture needs Input Monitoring")
-            .body(body)
-            .show();
-
-        if let Some(border) = app_handle.get_webview_window("scroll_border") {
-            let _ = border.close();
-        }
-        // The panel closes itself on this event.
-        let _ = app_handle.emit("scroll-capture-error", "input-monitoring");
     }
 
     /// Capture loop driven by the EXACT scroll offset from a `ScrollMonitor`

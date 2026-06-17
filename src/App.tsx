@@ -4,24 +4,25 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
 	ArrowRight,
 	ArrowUp,
+	CaseSensitive,
 	Check,
 	Circle,
 	Download,
 	Droplet,
+	Fullscreen,
 	GripVertical,
 	Languages,
 	Minus,
 	Palette,
-	PenLine,
+	PencilSparkles,
 	Pencil,
 	ScanText,
-	ImageDown,
 	ChevronDown,
 	Sparkles,
 	Square,
-	Type,
 	Undo2,
 	X,
+	type LucideIcon,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -90,18 +91,21 @@ interface Annotation {
 	html?: string;
 }
 
-// Excalidraw-style "Sloppiness": how hand-drawn / rough the stroke looks.
-// 0 = smooth (architect), 1 = artist, 2 = cartoonist. Maps to rough.js
-// roughness + bowing.
+// Stroke style: how hand-drawn / rough a shape looks. All levels render through
+// rough.js. 0 = Formal (roughness+bowing 0 = perfectly straight, for clean
+// diagrams), 1 = Smooth (barely hand-drawn), 2 = Artist (clearly sketchy).
 type Sloppiness = 0 | 1 | 2;
 function roughFor(s: Sloppiness | undefined): { roughness: number; bowing: number } {
 	switch (s) {
 		case 2:
-			return { roughness: 2.6, bowing: 2 };
+			// Artist (3rd option).
+			return { roughness: 1.25, bowing: 1 };
 		case 1:
-			return { roughness: 1.3, bowing: 1.2 };
+			// Smooth (2nd option) — nudged up a touch.
+			return { roughness: 0.85, bowing: 0.7 };
 		default:
-			return { roughness: 0.4, bowing: 0.6 };
+			// Formal — zero roughness/bowing → dead-straight edges.
+			return { roughness: 0, bowing: 0 };
 	}
 }
 
@@ -123,12 +127,12 @@ type ShapeSpec =
 // Single place that renders rect / oval / line / arrow, shared by the committed
 // redraw and the live drag-preview so they always match.
 //
-// Sloppiness 0 ("Smooth", the default) draws with NATIVE canvas paths — the
-// standard, fully anti-aliased renderer — so straight/diagonal edges are crisp
-// instead of the grainy doubled edge rough.js leaves. Levels 1-2 keep rough.js
-// for the intentional hand-drawn Excalidraw look.
+// ALL levels go through rough.js for one consistent engine. Formal (0) and
+// Smooth (1) disable rough's multi-stroke (which draws each edge twice and left
+// the grainy doubled diagonal) for a single clean stroke; Formal additionally
+// has zero roughness/bowing so it's dead straight. Artist keeps the full
+// hand-drawn multi-stroke look.
 function paintShape(
-	ctx: CanvasRenderingContext2D,
 	rc: ReturnType<typeof rough.canvas>,
 	s: Sloppiness,
 	spec: ShapeSpec,
@@ -155,37 +159,6 @@ function paintShape(
 		);
 	};
 
-	if (s === 0) {
-		ctx.save();
-		ctx.strokeStyle = color;
-		ctx.lineWidth = lw;
-		ctx.lineCap = "round";
-		ctx.lineJoin = "round";
-		ctx.beginPath();
-		if (spec.kind === "rect") ctx.rect(spec.x, spec.y, spec.w, spec.h);
-		else if (spec.kind === "oval")
-			ctx.ellipse(
-				spec.cx,
-				spec.cy,
-				Math.abs(spec.w) / 2,
-				Math.abs(spec.h) / 2,
-				0,
-				0,
-				Math.PI * 2,
-			);
-		else if (spec.kind === "line") {
-			ctx.moveTo(spec.x1, spec.y1);
-			ctx.lineTo(spec.x2, spec.y2);
-		} else if (spec.kind === "arrow")
-			arrowHead((fx, fy, tx, ty) => {
-				ctx.moveTo(fx, fy);
-				ctx.lineTo(tx, ty);
-			}, spec);
-		ctx.stroke();
-		ctx.restore();
-		return;
-	}
-
 	const ro = roughFor(s);
 	const opts = {
 		stroke: color,
@@ -193,6 +166,10 @@ function paintShape(
 		roughness: ro.roughness,
 		bowing: ro.bowing,
 		seed,
+		// Formal + Smooth: single stroke (no doubled grainy edge). Sloppy levels
+		// keep rough's default multi-stroke for the sketchy texture.
+		disableMultiStroke: s <= 1,
+		disableMultiStrokeFill: s <= 1,
 	};
 	if (spec.kind === "rect") rc.rectangle(spec.x, spec.y, spec.w, spec.h, opts);
 	else if (spec.kind === "oval")
@@ -265,7 +242,6 @@ let annotationId = 0;
 // Fixed rough.js seed for the live drag preview so the shape doesn't
 // re-jitter on every mousemove (only the committed annotation gets a unique
 // seed derived from its id).
-const PREVIEW_SEED = 42;
 
 function App() {
 	const [stage, setStage] = useState<Stage>("idle");
@@ -1467,6 +1443,65 @@ function App() {
 		};
 	}, [resetState]);
 
+	// Auto-mode hover driven by the GLOBAL cursor position (broadcast from Rust
+	// as `cursor-pos`). Each overlay runs this: if the cursor is on MY monitor,
+	// hit-test the window list and highlight; otherwise clear my highlight — so
+	// the highlight follows the cursor across monitors with a single active
+	// highlight and no click needed to "wake" a secondary screen.
+	const applyAutoHover = useCallback(
+		(sx: number, sy: number) => {
+			const idx = getWindowMonitorIndex();
+			const mon = monitors[idx];
+			if (!mon) return;
+			const onThisMonitor =
+				sx >= mon.x &&
+				sx < mon.x + mon.width &&
+				sy >= mon.y &&
+				sy < mon.y + mon.height;
+			if (!onThisMonitor) {
+				setHoveredWindow(null);
+				return;
+			}
+			// snappedWindows is front-to-back, so the FIRST rect containing the
+			// point is the topmost (visible) window — that's what the user is
+			// pointing at. Do NOT skip large/maximized windows: skipping them
+			// fell through to whatever sat behind, so hovering a big front window
+			// grabbed the one underneath. Only fall back to the whole monitor
+			// when no window contains the point at all (empty desktop).
+			const hit = snappedWindows.find(
+				(w) => sx >= w.x && sx < w.x + w.w && sy >= w.y && sy < w.y + w.h,
+			);
+			setHoveredWindow(
+				hit ?? {
+					id: -1,
+					x: mon.x,
+					y: mon.y,
+					w: mon.width,
+					h: mon.height,
+					app_name: "Screen",
+					title: "",
+					layer: 0,
+					alpha: 1,
+					pid: 0,
+				},
+			);
+		},
+		[monitors, snappedWindows],
+	);
+
+	// Global cursor broadcast (from Rust) → cross-monitor auto-hover. Re-runs the
+	// hit-test on every overlay so the highlight follows the cursor and only the
+	// monitor under it stays highlighted. Skipped while dragging a region.
+	useEffect(() => {
+		const unlisten = listen<[number, number]>("cursor-pos", (e) => {
+			if (stage !== "selecting" || selectMode !== "auto" || isDragging) return;
+			applyAutoHover(e.payload[0], e.payload[1]);
+		});
+		return () => {
+			unlisten.then((fn) => fn());
+		};
+	}, [stage, selectMode, isDragging, applyAutoHover]);
+
 	// Auto-stop / auto-finalize event from backend.
 	//
 	// NOTE: with the auto-scroll path, Rust copies the RGBA directly to the
@@ -1649,7 +1684,7 @@ function App() {
 
 			if (ann.type === "rect" && ann.w !== undefined) {
 				// Normalize so negative w/h (drawn right-to-left) render cleanly.
-				paintShape(ctx, rc, s, {
+				paintShape(rc, s, {
 					kind: "rect",
 					x: Math.min(ann.x, ann.x + ann.w),
 					y: Math.min(ann.y, ann.y + ann.h!),
@@ -1657,7 +1692,7 @@ function App() {
 					h: Math.abs(ann.h!),
 				}, style);
 			} else if (ann.type === "oval" && ann.w !== undefined) {
-				paintShape(ctx, rc, s, {
+				paintShape(rc, s, {
 					kind: "oval",
 					cx: ann.x + ann.w / 2,
 					cy: ann.y + ann.h! / 2,
@@ -1665,7 +1700,7 @@ function App() {
 					h: Math.abs(ann.h!),
 				}, style);
 			} else if (ann.type === "arrow" && ann.ex !== undefined) {
-				paintShape(ctx, rc, s, {
+				paintShape(rc, s, {
 					kind: "arrow",
 					x1: ann.x,
 					y1: ann.y,
@@ -1675,7 +1710,7 @@ function App() {
 					spread: Math.PI / 7,
 				}, style);
 			} else if (ann.type === "line" && ann.ex !== undefined) {
-				paintShape(ctx, rc, s, {
+				paintShape(rc, s, {
 					kind: "line",
 					x1: ann.x,
 					y1: ann.y,
@@ -1771,39 +1806,9 @@ function App() {
 			return;
 		}
 
-		// Auto-detect: convert cursor to screen coords and hit-test the cached
-		// window list. Hover only previews — the user has to click (or
-		// click-drag) to commit, matching native macOS Cmd+Shift+4+Space.
-		if (selectMode === "auto") {
-			const mon = monLocal();
-			const sx = mon.x + e.clientX;
-			const sy = mon.y + e.clientY;
-			const hit = snappedWindows.find((w) => {
-				if (!(sx >= w.x && sx < w.x + w.w && sy >= w.y && sy < w.y + w.h))
-					return false;
-				// Skip maximized/background surfaces that fill the whole monitor —
-				// those resolve to the full-screen target below anyway.
-				const coversScreen = w.w >= mon.width * 0.97 && w.h >= mon.height * 0.97;
-				return !coversScreen;
-			});
-			// Over a real window → highlight it. Over empty desktop / a full-screen
-			// background → highlight the WHOLE monitor so a click captures the
-			// entire screen.
-			setHoveredWindow(
-				hit ?? {
-					id: -1,
-					x: mon.x,
-					y: mon.y,
-					w: mon.width,
-					h: mon.height,
-					app_name: "Screen",
-					title: "",
-					layer: 0,
-					alpha: 1,
-					pid: 0,
-				},
-			);
-		}
+		// Auto-detect hover is driven by the global `cursor-pos` broadcast (see
+		// applyAutoHover) so it works across monitors without per-window
+		// mousemove. Nothing to do here in auto mode.
 	};
 
 	const handleMouseUp = (_e: React.MouseEvent) => {
@@ -2079,13 +2084,18 @@ function App() {
 
 		redrawAnnotations();
 		const ctx = canvasRef.current!.getContext("2d")!;
-		// Live preview shares paintShape() with the committed render. A FIXED seed
-		// keeps the hand-drawn jitter stable while the user drags the shape out.
+		// Live preview shares paintShape() with the committed render. Use the
+		// seed the commit will assign (next annotation id = annotationId + 1) so
+		// the wobble is IDENTICAL before and after release — no seed jump.
 		const rc = rough.canvas(canvasRef.current!);
-		const style = { color: strokeColor, lw: strokeWidth, seed: PREVIEW_SEED };
+		const style = {
+			color: strokeColor,
+			lw: strokeWidth,
+			seed: annotationId + 1,
+		};
 
 		if (tool === "rect")
-			paintShape(ctx, rc, sloppiness, {
+			paintShape(rc, sloppiness, {
 				kind: "rect",
 				x: Math.min(drawStart.x, x),
 				y: Math.min(drawStart.y, y),
@@ -2093,7 +2103,7 @@ function App() {
 				h: Math.abs(y - drawStart.y),
 			}, style);
 		else if (tool === "oval") {
-			paintShape(ctx, rc, sloppiness, {
+			paintShape(rc, sloppiness, {
 				kind: "oval",
 				cx: (drawStart.x + x) / 2,
 				cy: (drawStart.y + y) / 2,
@@ -2101,7 +2111,7 @@ function App() {
 				h: Math.abs(y - drawStart.y),
 			}, style);
 		} else if (tool === "arrow") {
-			paintShape(ctx, rc, sloppiness, {
+			paintShape(rc, sloppiness, {
 				kind: "arrow",
 				x1: drawStart.x,
 				y1: drawStart.y,
@@ -2111,7 +2121,7 @@ function App() {
 				spread: Math.PI / 7,
 			}, style);
 		} else if (tool === "line") {
-			paintShape(ctx, rc, sloppiness, {
+			paintShape(rc, sloppiness, {
 				kind: "line",
 				x1: drawStart.x,
 				y1: drawStart.y,
@@ -2925,21 +2935,21 @@ function App() {
 											onClick={() => handleToolChange(lastShape)}
 											title="Shapes"
 										>
-											<PenLine size={18} />
+											<ToolIcon icon={PencilSparkles} />
 										</ToolBtn>
 										<ToolBtn
 											active={tool === "textbox"}
 											onClick={() => handleToolChange("textbox")}
 											title="Text"
 										>
-											<Type size={18} />
+											<ToolIcon icon={CaseSensitive} />
 										</ToolBtn>
 										<ToolBtn
 											active={tool === "blur"}
 											onClick={() => handleToolChange("blur")}
 											title="Blur"
 										>
-											<Droplet size={18} />
+											<ToolIcon icon={Droplet} />
 										</ToolBtn>
 										<ToolBtn
 											active={tool === "text"}
@@ -2949,7 +2959,7 @@ function App() {
 											{ocrLoading ? (
 												<span style={{ fontSize: 11 }}>...</span>
 											) : (
-												<ScanText size={18} />
+												<ToolIcon icon={ScanText} />
 											)}
 										</ToolBtn>
 										<ToolBtn
@@ -2957,7 +2967,7 @@ function App() {
 											onClick={handleStartScroll}
 											title="Scroll capture — scroll the page yourself, Esc to finish"
 										>
-											<ImageDown size={18} />
+											<ToolIcon icon={Fullscreen} />
 										</ToolBtn>
 										<ToolBtn
 											onClick={handleTranslate}
@@ -2966,7 +2976,7 @@ function App() {
 											{translateLoading ? (
 												<span style={{ fontSize: 11 }}>...</span>
 											) : (
-												<Languages size={18} />
+												<ToolIcon icon={Languages} />
 											)}
 										</ToolBtn>
 										<ToolBtn
@@ -2977,7 +2987,7 @@ function App() {
 											{aiLoading ? (
 												<span style={{ fontSize: 11 }}>...</span>
 											) : (
-												<Sparkles size={18} />
+												<ToolIcon icon={Sparkles} />
 											)}
 										</ToolBtn>
 										<div
@@ -2989,24 +2999,24 @@ function App() {
 											}}
 										/>
 										<ToolBtn onClick={handleUndo} title="Undo (⌘Z)">
-											<Undo2 size={18} />
+											<ToolIcon icon={Undo2} />
 										</ToolBtn>
 										<ToolBtn onClick={handleSave} title="Save">
-											<Download size={18} />
+											<ToolIcon icon={Download} />
 										</ToolBtn>
 										<ToolBtn
 											onClick={cancelCapture}
 											style={{ color: "var(--red)" }}
 											title="Cancel"
 										>
-											<X size={18} />
+											<ToolIcon icon={X} />
 										</ToolBtn>
 										<ToolBtn
 											onClick={handleDone}
 											style={{ color: "var(--accent)" }}
 											title="Copy to clipboard"
 										>
-											<Check size={18} />
+											<ToolIcon icon={Check} />
 										</ToolBtn>
 									</div>
 									{/* Row 2: Options bar — separate floating bar below. */}
@@ -3027,11 +3037,11 @@ function App() {
 												<>
 													{(
 														[
-															["rect", <Square size={18} />, "Square"],
-															["oval", <Circle size={18} />, "Circle"],
-															["arrow", <ArrowRight size={18} />, "Arrow"],
-															["line", <Minus size={18} />, "Line"],
-															["draw", <Pencil size={18} />, "Draw"],
+															["rect", <ToolIcon icon={Square} />, "Square"],
+															["oval", <ToolIcon icon={Circle} />, "Circle"],
+															["arrow", <ToolIcon icon={ArrowRight} />, "Arrow"],
+															["line", <ToolIcon icon={Minus} />, "Line"],
+															["draw", <ToolIcon icon={Pencil} />, "Draw"],
 														] as [Tool, React.ReactNode, string][]
 													).map(([t, icon, title]) => (
 														<ToolBtn
@@ -3057,7 +3067,7 @@ function App() {
 													<DropPicker
 														compact
 														value={strokeWidth}
-														options={[2, 4, 6, 8]}
+														options={[2, 4, 8, 14]}
 														onChange={(v) => {
 															setStrokeWidth(v);
 															localStorage.setItem("ishot-stroke-w", String(v));
@@ -3938,8 +3948,106 @@ function DropPicker({
 }
 
 /**
- * Sloppiness selector (Excalidraw "hand-drawn" levels): smooth / artist /
- * cartoonist. Each option previews the roughness as a little squiggle.
+ * Toolbar icon with MEASURED optical sizing.
+ *
+ * lucide icons live on a 24-unit grid but each fills a different fraction of it
+ * (Square ≈ full, CaseSensitive letters / Fullscreen brackets leave padding), so
+ * the same `size` renders different visual sizes. Instead of hand-tuning each
+ * one, we measure the rendered glyph's bounding box (getBBox, in viewBox units)
+ * and scale the icon so its glyph fills `box` px — every toolbar icon ends up
+ * the same visual size automatically. `absoluteStrokeWidth` keeps the stroke a
+ * constant 2px regardless of that scale.
+ */
+function ToolIcon({ icon: Icon, box = 18 }: { icon: LucideIcon; box?: number }) {
+	const ref = useRef<HTMLSpanElement>(null);
+	const [size, setSize] = useState(box);
+	useLayoutEffect(() => {
+		const svg = ref.current?.querySelector("svg") as SVGGraphicsElement | null;
+		if (!svg) return;
+		try {
+			const bb = svg.getBBox(); // viewBox units (0..24), size-independent
+			const m = Math.max(bb.width, bb.height);
+			if (m > 0) setSize((box * 24) / m);
+		} catch {
+			/* getBBox throws if not laid out yet — keep default size */
+		}
+	}, [box]);
+	return (
+		<span
+			ref={ref}
+			style={{
+				width: box,
+				height: box,
+				display: "inline-flex",
+				alignItems: "center",
+				justifyContent: "center",
+			}}
+		>
+			<Icon size={size} absoluteStrokeWidth strokeWidth={2} />
+		</span>
+	);
+}
+
+/**
+ * Sloppiness level icon, drawn by rough.js ITSELF: a short stroke rendered with
+ * that level's exact roughness/bowing (same `roughFor` the real shapes use), so
+ * each icon is an authentic preview of how that level looks — Formal is dead
+ * straight, Artist is visibly sketchy. Rendered to a DPR-scaled canvas so
+ * it's crisp on Retina. Fixed seed = stable icon.
+ */
+function RoughLevelIcon({
+	level,
+	active,
+}: {
+	level: Sloppiness;
+	active: boolean;
+}) {
+	const ref = useRef<HTMLCanvasElement>(null);
+	useEffect(() => {
+		const c = ref.current;
+		if (!c) return;
+		const W = 26;
+		const H = 16;
+		const dpr = window.devicePixelRatio || 1;
+		c.width = W * dpr;
+		c.height = H * dpr;
+		const ctx = c.getContext("2d");
+		if (!ctx) return;
+		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+		ctx.clearRect(0, 0, W, H);
+		// A flowing up-down-up signature stroke (smooth spline through the
+		// points). At a 26px icon the REAL roughness values are too subtle to
+		// tell apart, so the icon EXAGGERATES the contrast: Formal = clean,
+		// Smooth = clearly wavy, Artist = scribbly. It's a label, not a literal
+		// preview — the actual shapes use roughFor()'s gentler numbers.
+		const ICON: Record<Sloppiness, { r: number; b: number; multi: boolean }> = {
+			0: { r: 0, b: 0, multi: false },
+			1: { r: 1.8, b: 1.3, multi: false },
+			2: { r: 3.6, b: 1.8, multi: true },
+		};
+		const cfg = ICON[level];
+		const pts: [number, number][] = [
+			[3, 11],
+			[8, 5],
+			[13, 11],
+			[18, 5],
+			[23, 10],
+		];
+		rough.canvas(c).curve(pts, {
+			stroke: active ? "#ffffff" : "rgba(0,0,0,0.85)",
+			strokeWidth: 2,
+			roughness: cfg.r,
+			bowing: cfg.b,
+			seed: 7,
+			disableMultiStroke: !cfg.multi,
+		});
+	}, [level, active]);
+	return <canvas ref={ref} style={{ width: 26, height: 16, display: "block" }} />;
+}
+
+/**
+ * Sloppiness selector (Excalidraw "hand-drawn" levels). Each option previews
+ * the roughness by rendering an actual rough.js stroke at that level.
  */
 function SloppinessPicker({
 	value,
@@ -3948,16 +4056,10 @@ function SloppinessPicker({
 	value: Sloppiness;
 	onChange: (v: Sloppiness) => void;
 }) {
-	// Squiggle paths approximating each roughness level (viewBox 0 0 22 16).
-	const PATHS: Record<Sloppiness, string> = {
-		0: "M3 9 C 7 3, 10 3, 13 9 S 18 13, 19 7",
-		1: "M3 9 q 2 -6 4 -1 q 2 5 4 -1 q 2 -5 4 1 q 1 3 3 0",
-		2: "M3 8 l2 -4 l1 6 l3 -6 l1 5 l3 -5 l2 5 l3 -4",
-	};
 	const OPTIONS: { value: Sloppiness; title: string }[] = [
-		{ value: 0, title: "Smooth" },
-		{ value: 1, title: "Artist" },
-		{ value: 2, title: "Cartoonist" },
+		{ value: 0, title: "Formal" },
+		{ value: 1, title: "Smooth" },
+		{ value: 2, title: "Artist" },
 	];
 	const [open, setOpen] = useState(false);
 	const ref = useRef<HTMLDivElement>(null);
@@ -3971,15 +4073,7 @@ function SloppinessPicker({
 		return () => document.removeEventListener("mousedown", close);
 	}, [open]);
 	const squiggle = (v: Sloppiness, on: boolean) => (
-		<svg width="20" height="15" viewBox="0 0 22 16" fill="none">
-			<path
-				d={PATHS[v]}
-				stroke={on ? "#fff" : "var(--label)"}
-				strokeWidth="1.8"
-				strokeLinecap="round"
-				strokeLinejoin="round"
-			/>
-		</svg>
+		<RoughLevelIcon level={v} active={on} />
 	);
 	return (
 		<div ref={ref} style={{ position: "relative" }}>

@@ -42,36 +42,8 @@ const FIELD_LINE_DELTA_X: u32 = 12;
 /// rough constant is fine.
 const PIXELS_PER_LINE: f64 = 40.0;
 
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGPreflightListenEventAccess() -> bool;
-    fn CGRequestListenEventAccess() -> bool;
-}
-
-/// True if the app already holds Input Monitoring permission.
-pub fn has_input_monitoring() -> bool {
-    unsafe { CGPreflightListenEventAccess() }
-}
-
-/// Prompt for Input Monitoring (no-op if already granted). macOS shows the
-/// system prompt only once; later calls just return the current grant state.
-/// A `false` on first run is expected — TCC needs an app restart to take effect.
-pub fn request_input_monitoring() -> bool {
-    unsafe {
-        if CGPreflightListenEventAccess() {
-            return true;
-        }
-        CGRequestListenEventAccess()
-    }
-}
-
-/// Open System Settings directly at Privacy & Security → Input Monitoring so
-/// the user lands exactly where the iShot toggle lives.
-pub fn open_input_monitoring_settings() {
-    let _ = std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
-        .spawn();
-}
+// NOTE: a scroll-ONLY listen-only tap needs no TCC permission (Input Monitoring
+// gates keyboard taps), so there is intentionally no preflight/request here.
 
 struct Shared {
     start: Instant,
@@ -91,12 +63,15 @@ pub struct ScrollMonitor {
 }
 
 impl ScrollMonitor {
-    /// Start tapping. Returns `None` if Input Monitoring isn't granted or the
-    /// tap couldn't be created.
+    /// Start tapping. Returns `None` only if the tap genuinely couldn't be
+    /// created.
+    ///
+    /// NOTE: a listen-only tap whose mask contains ONLY scroll-wheel events
+    /// (no keyboard events) needs NO TCC permission on macOS — Input Monitoring
+    /// gates keyboard observation, not mouse/scroll. So we do NOT preflight
+    /// `CGPreflightListenEventAccess` (it's keyboard-broad and would force an
+    /// unnecessary permission); we just create the tap and use it.
     pub fn start() -> Option<ScrollMonitor> {
-        if !has_input_monitoring() {
-            return None;
-        }
 
         let shared = Arc::new(Shared {
             start: Instant::now(),

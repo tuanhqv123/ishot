@@ -127,6 +127,15 @@ struct AppState {
 fn trigger_screenshot(app: &tauri::AppHandle) {
     use crate::services::screen_capture::ScreenCaptureService;
 
+    // Gate on Screen Recording: without it, capture returns black/garbage and
+    // the overlay would just look broken. Guide the user to Settings instead.
+    #[cfg(target_os = "macos")]
+    if !has_screen_recording() {
+        println!("[capture] screen recording not granted — guiding user to Settings");
+        screen_recording_guidance(app);
+        return;
+    }
+
     let monitors = match ScreenCaptureService::get_monitors_info() {
         Ok(m) => m,
         Err(e) => { eprintln!("get_monitors_info failed: {}", e); return; }
@@ -135,6 +144,10 @@ fn trigger_screenshot(app: &tauri::AppHandle) {
 
     // Clear old screenshot data first so overlay doesn't flash stale content
     let _ = app.emit("screenshot-clear", ());
+
+    // Broadcast the global cursor position to every overlay so window-select
+    // hover follows the cursor across monitors (one highlight, no click needed).
+    crate::services::cursor_track::start(app.clone());
 
     // Show the main overlay on the primary monitor
     if let Some(overlay) = app.get_webview_window("overlay") {
@@ -638,22 +651,50 @@ fn str_to_code(s: &str) -> Code {
 }
 
 #[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+#[cfg(target_os = "macos")]
+fn has_screen_recording() -> bool {
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+#[cfg(target_os = "macos")]
 fn request_screen_recording_permission() {
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGPreflightScreenCaptureAccess() -> bool;
-        fn CGRequestScreenCaptureAccess() -> bool;
-    }
-    
     unsafe {
         let has_access = CGPreflightScreenCaptureAccess();
         println!("Screen recording permission: {}", has_access);
-        
         if !has_access {
             let granted = CGRequestScreenCaptureAccess();
             println!("Permission request result: {}", granted);
         }
     }
+}
+
+/// Screen Recording is a SIP-protected TCC permission — macOS provides NO in-app
+/// one-click Allow for it (unlike Camera/Mic). The most we can do is fire the
+/// native prompt, deep-link to the exact Settings pane, and tell the user to
+/// relaunch (the grant doesn't take effect until the app restarts). Called when
+/// a capture is attempted without the permission, instead of showing a broken
+/// black overlay.
+#[cfg(target_os = "macos")]
+fn screen_recording_guidance(app: &tauri::AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+    unsafe {
+        let _ = CGRequestScreenCaptureAccess();
+    }
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        .spawn();
+    let _ = app
+        .notification()
+        .builder()
+        .title("iShot needs Screen Recording")
+        .body("Turn on iShot under Privacy & Security → Screen Recording, then relaunch iShot.")
+        .show();
 }
 
 /// Deactivate iShot when the selecting stage ends so the previously-foreground

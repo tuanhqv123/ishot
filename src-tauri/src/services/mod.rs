@@ -2,6 +2,7 @@ pub mod screen_capture;
 pub mod ocr;
 pub mod translate;
 pub mod hud;
+pub mod cursor_track;
 pub mod scroll_capture;
 pub mod scroll_events;
 pub mod accessibility;

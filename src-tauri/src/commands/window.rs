@@ -63,6 +63,8 @@ pub async fn show_overlay(app_handle: tauri::AppHandle) -> Result<(), String> {
 /// Callers that need to notify frontends should emit "cancel-capture" themselves.
 #[tauri::command]
 pub async fn hide_overlay(app_handle: tauri::AppHandle) -> Result<(), String> {
+    // Capture session is over — stop the global cursor broadcaster.
+    crate::services::cursor_track::stop();
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
         let _ = overlay.hide();
     }

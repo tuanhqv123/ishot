@@ -27,6 +27,43 @@ struct ChatRequest<'a> {
     stream: bool,
 }
 
+/// Non-streaming chat completion — returns the full assistant message. Used by
+/// features that just need the final text (e.g. translation), not token-by-token.
+pub async fn complete_chat(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    messages: Vec<ChatMessage>,
+) -> Result<String, String> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| format!("client init: {}", e))?;
+    let body = ChatRequest { model, messages: &messages, stream: false };
+    let resp = client
+        .post(&url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("network: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("HTTP {}: {}", status, truncate(&text, 300)));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| format!("decode: {}", e))?;
+    let content = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(content)
+}
+
 pub async fn stream_chat(
     base_url: &str,
     api_key: &str,

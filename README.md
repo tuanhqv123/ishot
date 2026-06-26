@@ -97,7 +97,8 @@ bun run tauri build
 If iShot saves you a few clicks every day, a coffee keeps it going:
 
 - ⭐ **Star this repo** — it genuinely helps.
-- ☕ [**Ko-fi**](https://ko-fi.com/tuantran1849) (international) · 🇻🇳 VietQR (in-app: Settings → Support → Vietnam)
+- ☕ [**Ko-fi**](https://ko-fi.com/tuantran1849) — international
+- 🏦 [**VietQR (Techcombank)**](https://vietqr.app/img?acc=1409200477&bank=Techcombank&template=qronly&showinfo=true) — Vietnam, click to open the QR and scan to transfer
 
 ## Star History
 

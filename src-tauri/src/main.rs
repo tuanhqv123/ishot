@@ -474,6 +474,7 @@ fn main() {
             //   ─────────────
             //   Quit iShot
             let capture_i = MenuItem::with_id(app, "capture", "Capture", true, None::<&str>)?;
+            let record_i = MenuItem::with_id(app, "record", "Record Screen", true, None::<&str>)?;
             let clipboard_i = MenuItem::with_id(app, "clipboard_history", "Clipboard History", true, None::<&str>)?;
             let separator1 = PredefinedMenuItem::separator(app)?;
             let settings_i = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
@@ -486,6 +487,7 @@ fn main() {
                 app,
                 &[
                     &capture_i,
+                    &record_i,
                     &clipboard_i,
                     &separator1,
                     &settings_i,
@@ -518,6 +520,9 @@ fn main() {
                             // Trigger screenshot directly — same code path the
                             // global shortcut uses.
                             trigger_screenshot(app);
+                        }
+                        "record" => {
+                            open_recorder_window(app);
                         }
                         "launch_at_login" => {
                             let autostart = app.autolaunch();
@@ -677,6 +682,12 @@ fn main() {
             commands::appearance::get_desktop_wallpaper_path,
             commands::appearance::read_image_as_data_url,
             commands::hud::show_hud,
+            commands::recorder::list_capture_targets,
+            commands::recorder::recording_status,
+            commands::recorder::start_recording,
+            commands::recorder::pause_recording,
+            commands::recorder::resume_recording,
+            commands::recorder::stop_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -803,6 +814,50 @@ fn release_overlay_cursor(app: tauri::AppHandle) {
     }
     #[cfg(not(target_os = "macos"))]
     let _ = app;
+}
+
+/// Open (or focus) the Loom-style record control toolbar — a small always-on-top
+/// bar at the bottom-center of the active monitor with source/mic/camera options
+/// and Start/Pause/Stop. The native capture engine hangs off its commands.
+fn open_recorder_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("recorder_bar") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    const BAR_W: f64 = 540.0;
+    const BAR_H: f64 = 68.0;
+    let monitor = app
+        .cursor_position()
+        .ok()
+        .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let (x, y) = match monitor {
+        Some(m) => {
+            let s = m.scale_factor();
+            let mx = m.position().x as f64 / s;
+            let my = m.position().y as f64 / s;
+            let mw = m.size().width as f64 / s;
+            let mh = m.size().height as f64 / s;
+            (mx + (mw - BAR_W) / 2.0, my + mh - BAR_H - mh * 0.06)
+        }
+        None => (200.0, 200.0),
+    };
+    let _ = tauri::WebviewWindowBuilder::new(
+        app,
+        "recorder_bar",
+        tauri::WebviewUrl::App("recording.html".into()),
+    )
+    .title("Record")
+    .inner_size(BAR_W, BAR_H)
+    .position(x, y)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .resizable(false)
+    .visible(true)
+    .build();
+    // TODO(capture-engine): setSharingType:0 so the bar itself isn't recorded.
 }
 
 #[allow(dead_code)] // legacy recorder window — kept while the old HTML entry exists

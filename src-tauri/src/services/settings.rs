@@ -60,6 +60,29 @@ impl Default for AppearanceConfig {
     }
 }
 
+/// Loom-style screen recording defaults: which inputs are on and where the
+/// camera bubble sits. Persisted so the record toolbar remembers last choices.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RecordingConfig {
+    pub mic: bool,
+    pub camera: bool,
+    /// "screen" (entire display) or "window" (a chosen window).
+    pub source: String,
+    /// Camera bubble corner: "br" | "bl" | "tr" | "tl".
+    pub camera_pos: String,
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            mic: false,
+            camera: false,
+            source: "screen".to_string(),
+            camera_pos: "br".to_string(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settings {
     pub shortcuts: Shortcuts,
@@ -67,6 +90,8 @@ pub struct Settings {
     pub ai: AiConfig,
     #[serde(default)]
     pub appearance: AppearanceConfig,
+    #[serde(default)]
+    pub recording: RecordingConfig,
 }
 
 impl Default for Settings {
@@ -88,6 +113,7 @@ impl Default for Settings {
                 model: "gpt-4o-mini".to_string(),
             },
             appearance: Default::default(),
+            recording: Default::default(),
         }
     }
 }

@@ -10,3 +10,4 @@ pub mod settings;
 pub mod ai_chat;
 pub mod appearance;
 pub mod hud;
+pub mod recorder;

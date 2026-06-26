@@ -854,7 +854,9 @@ fn open_recorder_window(app: &tauri::AppHandle) {
     .decorations(false)
     .transparent(true)
     .always_on_top(true)
-    .resizable(false)
+    // resizable(true) is REQUIRED so the JS side can grow the window upward to
+    // show the source dropdown (a 68px window would clip the menu).
+    .resizable(true)
     .visible(true)
     .build();
     // TODO(capture-engine): setSharingType:0 so the bar itself isn't recorded.

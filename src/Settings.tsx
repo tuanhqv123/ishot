@@ -65,6 +65,21 @@ const COLOR_LABELS: Record<string, string> = {
   "#ff375f": "Pink",
   "#30d158": "Green",
 };
+// Radius/padding as easy preset options (instead of fiddly sliders).
+const RADIUS_OPTIONS = [
+  { value: "0", label: "None" },
+  { value: "8", label: "Small" },
+  { value: "16", label: "Medium" },
+  { value: "24", label: "Large" },
+  { value: "40", label: "Extra large" },
+];
+const PADDING_OPTIONS = [
+  { value: "0", label: "None" },
+  { value: "32", label: "Small" },
+  { value: "64", label: "Medium" },
+  { value: "96", label: "Large" },
+  { value: "128", label: "Extra large" },
+];
 
 // Resolves the CSS `background` for a given appearance, using a cached
 // convertFileSrc URL for wallpaper/custom-image so the live preview shows the
@@ -564,7 +579,20 @@ export default function Settings() {
           </div>
 
           <div className={app.enabled ? "st-bg-controls" : "st-bg-controls disabled"}>
-            {/* Type dropdown — compact, replaces the long swatch grid. */}
+            {/* Shadow toggle grouped with Enable (both are switches). */}
+            <div className="st-row">
+              <div className="st-label">Shadow</div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={app.shadow}
+                className={app.shadow ? "st-switch on" : "st-switch"}
+                onClick={() => updateAppearance({ shadow: !app.shadow })}
+              >
+                <span className="st-switch-knob" />
+              </button>
+            </div>
+
             <div className="st-row">
               <div className="st-label">Type</div>
               <Dropdown
@@ -588,6 +616,7 @@ export default function Settings() {
                   options={GRADIENT_PRESETS.map((g) => ({
                     value: g.id,
                     label: g.id.charAt(0).toUpperCase() + g.id.slice(1),
+                    swatch: gradientCss(g.id),
                   }))}
                 />
               </div>
@@ -602,6 +631,7 @@ export default function Settings() {
                   options={COLOR_PRESETS.map((c) => ({
                     value: c,
                     label: COLOR_LABELS[c] ?? c,
+                    swatch: c,
                   }))}
                 />
               </div>
@@ -620,51 +650,27 @@ export default function Settings() {
               </div>
             )}
 
-            {/* Sliders (left) + live preview (right), side by side. The preview
-                updates radius/padding/shadow live as the user drags. */}
+            <div className="st-row">
+              <div className="st-label">Corner radius</div>
+              <Dropdown
+                value={String(app.radius)}
+                onChange={(v) => updateAppearance({ radius: parseInt(v, 10) })}
+                options={RADIUS_OPTIONS}
+              />
+            </div>
+
+            <div className="st-row">
+              <div className="st-label">Padding</div>
+              <Dropdown
+                value={String(app.padding)}
+                onChange={(v) => updateAppearance({ padding: parseInt(v, 10) })}
+                options={PADDING_OPTIONS}
+              />
+            </div>
+
+            {/* Live preview — updates as the options change. */}
             <div className="st-row st-bg-preview-row">
-              <div className="st-bg-sliders">
-                <div className="st-slider-label">
-                  <span>Radius</span>
-                  <span className="st-hint">{app.radius}px</span>
-                </div>
-                <input
-                  className="st-slider"
-                  type="range"
-                  min={0}
-                  max={48}
-                  value={app.radius}
-                  onChange={(e) =>
-                    updateAppearance({ radius: parseInt(e.target.value, 10) })
-                  }
-                />
-                <div className="st-slider-label">
-                  <span>Padding</span>
-                  <span className="st-hint">{app.padding}px</span>
-                </div>
-                <input
-                  className="st-slider"
-                  type="range"
-                  min={0}
-                  max={160}
-                  value={app.padding}
-                  onChange={(e) =>
-                    updateAppearance({ padding: parseInt(e.target.value, 10) })
-                  }
-                />
-                <div className="st-slider-label">
-                  <span>Shadow</span>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={app.shadow}
-                    className={app.shadow ? "st-switch on" : "st-switch"}
-                    onClick={() => updateAppearance({ shadow: !app.shadow })}
-                  >
-                    <span className="st-switch-knob" />
-                  </button>
-                </div>
-              </div>
+              <div className="st-label">Preview</div>
               <div
                 className={
                   "st-preview-tile" +

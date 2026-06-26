@@ -4,6 +4,23 @@ import { ChevronDown } from "lucide-react";
 export interface DropdownOption {
 	value: string;
 	label: string;
+	/** Optional CSS background (color or gradient) shown as a swatch chip. */
+	swatch?: string;
+}
+
+function Swatch({ bg }: { bg: string }) {
+	return (
+		<span
+			style={{
+				flexShrink: 0,
+				width: 18,
+				height: 18,
+				borderRadius: 5,
+				background: bg,
+				boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.18)",
+			}}
+		/>
+	);
 }
 
 /**
@@ -76,12 +93,22 @@ export default function Dropdown({
 			>
 				<span
 					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 8,
 						overflow: "hidden",
-						textOverflow: "ellipsis",
-						whiteSpace: "nowrap",
 					}}
 				>
-					{current?.label ?? value}
+					{current?.swatch && <Swatch bg={current.swatch} />}
+					<span
+						style={{
+							overflow: "hidden",
+							textOverflow: "ellipsis",
+							whiteSpace: "nowrap",
+						}}
+					>
+						{current?.label ?? value}
+					</span>
 				</span>
 				<ChevronDown size={15} style={{ opacity: 0.55, flexShrink: 0 }} />
 			</button>
@@ -129,18 +156,28 @@ export default function Dropdown({
 											"transparent";
 								}}
 								style={{
+									display: "flex",
+									alignItems: "center",
+									gap: 8,
 									padding: "6px 10px",
 									borderRadius: 5,
 									fontSize: 13,
 									cursor: "pointer",
 									whiteSpace: "nowrap",
 									overflow: "hidden",
-									textOverflow: "ellipsis",
 									color: sel ? "#fff" : "rgba(255,255,255,0.9)",
 									background: sel ? "rgba(10,132,255,0.9)" : "transparent",
 								}}
 							>
-								{o.label}
+								{o.swatch && <Swatch bg={o.swatch} />}
+								<span
+									style={{
+										overflow: "hidden",
+										textOverflow: "ellipsis",
+									}}
+								>
+									{o.label}
+								</span>
 							</li>
 						);
 					})}

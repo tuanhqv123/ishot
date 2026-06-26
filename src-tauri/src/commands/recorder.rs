@@ -310,17 +310,19 @@ pub fn resume_recording(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Stop recording. Returns the path to the finished clip (None until the
-/// capture engine is wired up).
-#[tauri::command]
-pub fn stop_recording(app: AppHandle) -> Result<Option<String>, String> {
+/// Stop recording + close the camera bubble + open the preview. Shared by the
+/// `stop_recording` command and the tray "Stop Recording" item.
+pub fn do_stop(app: &AppHandle) -> Option<String> {
     if !RECORDING.load(Ordering::SeqCst) {
-        return Ok(None);
+        return None;
     }
     let path = crate::services::recorder::stop();
     RECORDING.store(false, Ordering::SeqCst);
     PAUSED.store(false, Ordering::SeqCst);
     let _ = app.emit("recording-state", status());
+    if let Some(w) = app.get_webview_window("camera_bubble") {
+        let _ = w.close();
+    }
     if let Some(ref p) = path {
         println!("[recorder] stopped, saved {}", p);
         // The .mov finalizes asynchronously after stopRecording; wait briefly
@@ -332,5 +334,10 @@ pub fn stop_recording(app: AppHandle) -> Result<Option<String>, String> {
             show_preview(&app2, &p2);
         });
     }
-    Ok(path)
+    path
+}
+
+#[tauri::command]
+pub fn stop_recording(app: AppHandle) -> Result<Option<String>, String> {
+    Ok(do_stop(&app))
 }

@@ -475,6 +475,7 @@ fn main() {
             //   Quit iShot
             let capture_i = MenuItem::with_id(app, "capture", "Capture", true, None::<&str>)?;
             let record_i = MenuItem::with_id(app, "record", "Record Screen", true, None::<&str>)?;
+            let stop_record_i = MenuItem::with_id(app, "stop_record", "■ Stop Recording", true, None::<&str>)?;
             let clipboard_i = MenuItem::with_id(app, "clipboard_history", "Clipboard History", true, None::<&str>)?;
             let separator1 = PredefinedMenuItem::separator(app)?;
             let settings_i = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
@@ -488,6 +489,7 @@ fn main() {
                 &[
                     &capture_i,
                     &record_i,
+                    &stop_record_i,
                     &clipboard_i,
                     &separator1,
                     &settings_i,
@@ -526,6 +528,11 @@ fn main() {
                             // so just open the capture overlay; the user picks the
                             // Record (Video) tool there.
                             trigger_screenshot(app);
+                        }
+                        "stop_record" => {
+                            // No on-screen control bar (it would be recorded), so
+                            // stopping happens here.
+                            commands::recorder::do_stop(app);
                         }
                         "launch_at_login" => {
                             let autostart = app.autolaunch();

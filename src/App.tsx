@@ -1126,7 +1126,8 @@ function App() {
 					crop,
 				},
 			});
-			invoke("open_record_bar").catch(() => {});
+			// No on-screen control bar (it would be baked into the video by the
+			// display-level capture). Stop via the tray "Stop Recording" item.
 		} catch (e) {
 			console.error("start_recording", e);
 		}

@@ -99,6 +99,15 @@ If iShot saves you a few clicks every day, a coffee keeps it going:
 - ⭐ **Star this repo** — it genuinely helps.
 - ☕ [**Ko-fi**](https://ko-fi.com/tuantran1849) (international) · 🇻🇳 VietQR (in-app: Settings → Support → Vietnam)
 
+## Star History
+
+<a href="https://star-history.com/#tuanhqv123/ishot&Date" target="_blank">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=tuanhqv123/ishot&type=Date&theme=dark" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=tuanhqv123/ishot&type=Date" width="620" />
+  </picture>
+</a>
+
 ## License
 
 [MIT](./LICENSE) © [Tuan Tran](https://github.com/tuanhqv123)

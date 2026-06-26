@@ -175,3 +175,8 @@ pnpm-lock.yaml
 ishot.key
 ishot.key.pub
 *.key
+
+# Lockfile + internal markdown (keep only README.md in the repo)
+bun.lock
+*.md
+!README.md

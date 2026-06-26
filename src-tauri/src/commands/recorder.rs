@@ -35,6 +35,9 @@ pub struct RecordOptions {
     pub monitor: Option<usize>,
     pub mic: bool,
     pub camera: bool,
+    /// Explicit crop rect [x, y, w, h] in global logical points (top-left
+    /// origin) — used when recording a selection from the capture overlay.
+    pub crop: Option<[f64; 4]>,
 }
 
 #[derive(Serialize, Clone)]
@@ -70,6 +73,13 @@ const BAR_W: f64 = 540.0;
 const BAR_H: f64 = 68.0;
 const MENU_EXTRA: f64 = 264.0;
 
+/// Open (or focus) the floating record controls bar — used after starting a
+/// recording from the capture toolbar, so the user gets Stop/Pause/timer.
+#[tauri::command]
+pub fn open_record_bar(app: AppHandle) {
+    crate::open_recorder_window(&app);
+}
+
 #[tauri::command]
 pub fn set_recorder_expanded(app: AppHandle, expanded: bool) {
     let app2 = app.clone();
@@ -99,8 +109,11 @@ pub fn start_recording(app: AppHandle, opts: RecordOptions) -> Result<(), String
         "[recorder] start source={} window={:?} monitor={:?} mic={} camera={}",
         opts.source, opts.window_id, opts.monitor, opts.mic, opts.camera
     );
-    // Window source → crop to that window's bounds; screen source → full display.
-    let crop = if opts.source == "window" {
+    // Explicit crop (selection from the overlay) wins; else window bounds for a
+    // window source; else full display.
+    let crop = if let Some(c) = opts.crop {
+        Some((c[0], c[1], c[2], c[3]))
+    } else if opts.source == "window" {
         opts.window_id.and_then(|id| {
             snapshot_windows()
                 .into_iter()

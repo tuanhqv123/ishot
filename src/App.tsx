@@ -21,6 +21,7 @@ import {
 	Sparkles,
 	Square,
 	Undo2,
+	Video,
 	X,
 	type LucideIcon,
 } from "lucide-react";
@@ -1058,6 +1059,39 @@ function App() {
 			await cancelCapture();
 		}
 	}, [renderFinalImage, cancelCapture]);
+
+	// Record the current selection as screen video: hide the overlay first (so
+	// it isn't captured), start recording cropped to the selection's global
+	// rect, then show the floating record controls (Stop/Pause/timer).
+	const handleRecord = useCallback(async () => {
+		if (!selection) return;
+		const dc = findDisplay();
+		const mon = dc?.monitor;
+		const crop = mon
+			? [
+					mon.x + selection.x,
+					mon.y + selection.y,
+					selection.width,
+					selection.height,
+				]
+			: null;
+		await cancelCapture();
+		try {
+			await invoke("start_recording", {
+				opts: {
+					source: "screen",
+					window_id: null,
+					monitor: null,
+					mic: false,
+					camera: false,
+					crop,
+				},
+			});
+			invoke("open_record_bar").catch(() => {});
+		} catch (e) {
+			console.error("start_recording", e);
+		}
+	}, [selection, findDisplay, cancelCapture]);
 
 	const handleSave = useCallback(async () => {
 		const bytes = await renderFinalImage();
@@ -3400,6 +3434,12 @@ function App() {
 											) : (
 												<ToolIcon icon={Sparkles} />
 											)}
+										</ToolBtn>
+										<ToolBtn
+											onClick={handleRecord}
+											title="Record this selection (screen video)"
+										>
+											<ToolIcon icon={Video} />
 										</ToolBtn>
 										<div
 											style={{

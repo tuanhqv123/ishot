@@ -685,6 +685,7 @@ fn main() {
             commands::recorder::list_capture_targets,
             commands::recorder::recording_status,
             commands::recorder::set_recorder_expanded,
+            commands::recorder::open_record_bar,
             commands::recorder::start_recording,
             commands::recorder::pause_recording,
             commands::recorder::resume_recording,

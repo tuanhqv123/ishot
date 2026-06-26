@@ -1501,10 +1501,15 @@ function App() {
 		}
 	});
 
+	// Monotonic request id so a slower earlier translation can't overwrite the
+	// result of a newer one (e.g. switching language mid-translate).
+	const translateReqRef = useRef(0);
+
 	// Pure translate call (no OCR). Used by handleTranslate AND by the
 	// language-dropdown change handler in the result dialog.
 	const runTranslation = useCallback(
 		async (sourceText: string, target: string) => {
+			const myReq = ++translateReqRef.current;
 			setTranslateLoading(true);
 			setTranslatedText("");
 			try {
@@ -1513,11 +1518,12 @@ function App() {
 					source_lang: string;
 					target_lang: string;
 				}>("translate_text", { text: sourceText, targetLang: target });
-				setTranslatedText(result.translated);
+				if (translateReqRef.current === myReq) setTranslatedText(result.translated);
 			} catch (e) {
-				setTranslatedText("Translation failed: " + e);
+				if (translateReqRef.current === myReq)
+					setTranslatedText("Translation failed: " + e);
 			} finally {
-				setTranslateLoading(false);
+				if (translateReqRef.current === myReq) setTranslateLoading(false);
 			}
 		},
 		[],
@@ -1572,13 +1578,9 @@ function App() {
 				return;
 			}
 			setTranslateSource(sourceText);
-			// Pick initial target language: if source looks ASCII (likely English) →
-			// translate to current preference (default vi); else → en.
-			const initialTarget = /^[a-zA-Z\s.,!?'"()-]+$/.test(sourceText)
-				? translateTarget
-				: "en";
-			setTranslateTarget(initialTarget);
-			await runTranslation(sourceText, initialTarget);
+			// Always use the user's last-chosen target language (persisted) — no
+			// auto-override to English. They can switch it in the result dialog.
+			await runTranslation(sourceText, translateTarget);
 		} catch (e) {
 			setTranslatedText("Translation failed: " + e);
 			setTranslateLoading(false);

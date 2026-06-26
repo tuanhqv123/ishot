@@ -26,6 +26,17 @@ export default function RecordingPreview() {
 		}
 	};
 
+	// Keep playback inside the trim range — loop back to start when it reaches
+	// the end (or before start). Only while playing, so dragging handles (which
+	// pauses + seeks) isn't fought by the loop.
+	const onTimeUpdate = () => {
+		const v = videoRef.current;
+		if (!v || v.paused || !dur) return;
+		if (v.currentTime >= end || v.currentTime < start - 0.05) {
+			v.currentTime = start;
+		}
+	};
+
 	// Thumbnails for the strip (best-effort; blob-loaded to avoid canvas taint).
 	useEffect(() => {
 		if (!src) return;
@@ -160,7 +171,9 @@ export default function RecordingPreview() {
 				src={src}
 				controls
 				autoPlay
+				loop
 				onLoadedMetadata={onLoaded}
+				onTimeUpdate={onTimeUpdate}
 				className="min-h-0 flex-1 rounded-lg bg-black"
 				style={{ objectFit: "contain", width: "100%" }}
 			/>
@@ -199,6 +212,7 @@ export default function RecordingPreview() {
 					style={handle(pct(start))}
 					onPointerDown={(e) => {
 						e.preventDefault();
+						videoRef.current?.pause();
 						dragRef.current = "start";
 					}}
 				/>
@@ -206,6 +220,7 @@ export default function RecordingPreview() {
 					style={handle(pct(end))}
 					onPointerDown={(e) => {
 						e.preventDefault();
+						videoRef.current?.pause();
 						dragRef.current = "end";
 					}}
 				/>
@@ -232,7 +247,7 @@ export default function RecordingPreview() {
 						onClick={save}
 						className="h-9 rounded-lg bg-[#0a84ff] px-4 text-[13px] font-semibold text-white hover:bg-[#3a9bff]"
 					>
-						Save…
+						Save
 					</button>
 				</div>
 			</div>

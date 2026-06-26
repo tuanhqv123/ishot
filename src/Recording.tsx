@@ -81,6 +81,8 @@ export default function Recording() {
 			}}
 		>
 			<div
+				data-tauri-drag-region
+				title="Drag to move"
 				style={{
 					display: "flex",
 					alignItems: "center",
@@ -91,6 +93,7 @@ export default function Recording() {
 					borderRadius: "var(--radius-m)",
 					boxShadow: "var(--shadow-pop)",
 					userSelect: "none",
+					cursor: "grab",
 				}}
 			>
 				<span

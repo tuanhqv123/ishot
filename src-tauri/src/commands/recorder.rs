@@ -175,40 +175,44 @@ const CAM_SIZE: f64 = 180.0;
 /// normal on-screen always-on-top window, so the screen recorder captures it.
 #[tauri::command]
 pub fn open_camera_bubble(app: AppHandle) {
-    if let Some(w) = app.get_webview_window("camera_bubble") {
-        let _ = w.show();
-        return;
-    }
-    let monitor = app
-        .cursor_position()
-        .ok()
-        .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
-        .or_else(|| app.primary_monitor().ok().flatten());
-    let (x, y) = match monitor {
-        Some(m) => {
-            let s = m.scale_factor();
-            let mx = m.position().x as f64 / s;
-            let my = m.position().y as f64 / s;
-            let mw = m.size().width as f64 / s;
-            let mh = m.size().height as f64 / s;
-            (mx + mw - CAM_SIZE - 28.0, my + mh - CAM_SIZE - 28.0)
+    // Window creation must run on the main thread (commands run on a worker).
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = app2.get_webview_window("camera_bubble") {
+            let _ = w.show();
+            return;
         }
-        None => (200.0, 200.0),
-    };
-    let _ = tauri::WebviewWindowBuilder::new(
-        &app,
-        "camera_bubble",
-        tauri::WebviewUrl::App("camera.html".into()),
-    )
-    .title("Camera")
-    .inner_size(CAM_SIZE, CAM_SIZE)
-    .position(x, y)
-    .decorations(false)
-    .transparent(true)
-    .always_on_top(true)
-    .resizable(false)
-    .visible(true)
-    .build();
+        let monitor = app2
+            .cursor_position()
+            .ok()
+            .and_then(|p| app2.monitor_from_point(p.x, p.y).ok().flatten())
+            .or_else(|| app2.primary_monitor().ok().flatten());
+        let (x, y) = match monitor {
+            Some(m) => {
+                let s = m.scale_factor();
+                let mx = m.position().x as f64 / s;
+                let my = m.position().y as f64 / s;
+                let mw = m.size().width as f64 / s;
+                let mh = m.size().height as f64 / s;
+                (mx + mw - CAM_SIZE - 28.0, my + mh - CAM_SIZE - 28.0)
+            }
+            None => (200.0, 200.0),
+        };
+        let _ = tauri::WebviewWindowBuilder::new(
+            &app2,
+            "camera_bubble",
+            tauri::WebviewUrl::App("camera.html".into()),
+        )
+        .title("Camera")
+        .inner_size(CAM_SIZE, CAM_SIZE)
+        .position(x, y)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .resizable(false)
+        .visible(true)
+        .build();
+    });
 }
 
 #[tauri::command]

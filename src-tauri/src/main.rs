@@ -827,46 +827,52 @@ fn release_overlay_cursor(app: tauri::AppHandle) {
 /// bar at the bottom-center of the active monitor with source/mic/camera options
 /// and Start/Pause/Stop. The native capture engine hangs off its commands.
 fn open_recorder_window(app: &tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("recorder_bar") {
-        let _ = w.show();
-        let _ = w.set_focus();
-        return;
-    }
-    const BAR_W: f64 = 540.0;
-    const BAR_H: f64 = 68.0;
-    let monitor = app
-        .cursor_position()
-        .ok()
-        .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
-        .or_else(|| app.primary_monitor().ok().flatten());
-    let (x, y) = match monitor {
-        Some(m) => {
-            let s = m.scale_factor();
-            let mx = m.position().x as f64 / s;
-            let my = m.position().y as f64 / s;
-            let mw = m.size().width as f64 / s;
-            let mh = m.size().height as f64 / s;
-            (mx + (mw - BAR_W) / 2.0, my + mh - BAR_H - mh * 0.06)
+    // Window creation is AppKit — must run on the main thread. This is called
+    // both from the tray (already main) and from the `open_record_bar` command
+    // (a worker thread), so always dispatch to be safe.
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(w) = app.get_webview_window("recorder_bar") {
+            let _ = w.show();
+            let _ = w.set_focus();
+            return;
         }
-        None => (200.0, 200.0),
-    };
-    let _ = tauri::WebviewWindowBuilder::new(
-        app,
-        "recorder_bar",
-        tauri::WebviewUrl::App("recording.html".into()),
-    )
-    .title("Record")
-    .inner_size(BAR_W, BAR_H)
-    .position(x, y)
-    .decorations(false)
-    .transparent(true)
-    .always_on_top(true)
-    // resizable(true) is REQUIRED so the JS side can grow the window upward to
-    // show the source dropdown (a 68px window would clip the menu).
-    .resizable(true)
-    .visible(true)
-    .build();
-    // TODO(capture-engine): setSharingType:0 so the bar itself isn't recorded.
+        const BAR_W: f64 = 540.0;
+        const BAR_H: f64 = 68.0;
+        let monitor = app
+            .cursor_position()
+            .ok()
+            .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+            .or_else(|| app.primary_monitor().ok().flatten());
+        let (x, y) = match monitor {
+            Some(m) => {
+                let s = m.scale_factor();
+                let mx = m.position().x as f64 / s;
+                let my = m.position().y as f64 / s;
+                let mw = m.size().width as f64 / s;
+                let mh = m.size().height as f64 / s;
+                (mx + (mw - BAR_W) / 2.0, my + mh - BAR_H - mh * 0.06)
+            }
+            None => (200.0, 200.0),
+        };
+        let _ = tauri::WebviewWindowBuilder::new(
+            &app,
+            "recorder_bar",
+            tauri::WebviewUrl::App("recording.html".into()),
+        )
+        .title("Record")
+        .inner_size(BAR_W, BAR_H)
+        .position(x, y)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        // resizable(true) is REQUIRED so the JS side can grow the window upward
+        // to show the source dropdown (a 68px window would clip the menu).
+        .resizable(true)
+        .visible(true)
+        .build();
+        // TODO(capture-engine): setSharingType:0 so the bar itself isn't recorded.
+    });
 }
 
 #[allow(dead_code)] // legacy recorder window — kept while the old HTML entry exists

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -40,6 +40,21 @@ interface RecordingStatus {
 
 type SourceValue = string;
 
+// Icon button matching the app's ToolBtn (light toolbar).
+const toolBtn = (active = false): CSSProperties => ({
+	width: "var(--ctrl)",
+	height: "var(--ctrl)",
+	padding: 0,
+	border: "none",
+	borderRadius: "var(--radius-s)",
+	cursor: "pointer",
+	background: active ? "var(--accent)" : "transparent",
+	color: active ? "#fff" : "var(--label)",
+	display: "flex",
+	alignItems: "center",
+	justifyContent: "center",
+});
+
 export default function Recording() {
 	const [targets, setTargets] = useState<CaptureTargets | null>(null);
 	const [source, setSource] = useState<SourceValue>("screen:0");
@@ -50,20 +65,6 @@ export default function Recording() {
 		paused: false,
 	});
 	const [elapsed, setElapsed] = useState(0);
-
-	// Elapsed timer: counts up while recording and not paused; resets on stop.
-	useEffect(() => {
-		if (!status.recording) {
-			setElapsed(0);
-			return;
-		}
-		if (status.paused) return;
-		const t = setInterval(() => setElapsed((e) => e + 1), 1000);
-		return () => clearInterval(t);
-	}, [status.recording, status.paused]);
-	const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(
-		elapsed % 60,
-	).padStart(2, "0")}`;
 
 	useEffect(() => {
 		invoke<CaptureTargets>("list_capture_targets")
@@ -77,9 +78,22 @@ export default function Recording() {
 		};
 	}, []);
 
-	// The source menu can exceed the 68px bar window; ask the backend to grow the
-	// window upward (and restore on close) so the menu renders fully. Done in
-	// Rust on the main thread — the only reliable place to size this window.
+	// Elapsed timer: counts up while recording and not paused.
+	useEffect(() => {
+		if (!status.recording) {
+			setElapsed(0);
+			return;
+		}
+		if (status.paused) return;
+		const t = setInterval(() => setElapsed((e) => e + 1), 1000);
+		return () => clearInterval(t);
+	}, [status.recording, status.paused]);
+	const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(
+		elapsed % 60,
+	).padStart(2, "0")}`;
+
+	// The source menu can exceed the bar window; ask the backend to grow the
+	// window upward while it's open (Rust main-thread sizing is the reliable path).
 	const onMenuOpen = useCallback((open: boolean) => {
 		invoke("set_recorder_expanded", { expanded: open }).catch((e) =>
 			console.error("set_recorder_expanded", e),
@@ -96,6 +110,7 @@ export default function Recording() {
 					monitor: kind === "screen" ? Number(idStr) : null,
 					mic,
 					camera,
+					crop: null,
 				},
 			});
 		} catch (e) {
@@ -107,7 +122,6 @@ export default function Recording() {
 		try {
 			await invoke<string | null>("stop_recording");
 			invoke("close_camera_bubble").catch(() => {});
-			// TODO(preview): open the preview+timeline window with the returned path.
 		} catch (e) {
 			console.error("stop_recording", e);
 		}
@@ -145,11 +159,6 @@ export default function Recording() {
 		})) ?? []),
 	];
 
-	const pill =
-		"flex items-center justify-center rounded-full transition-colors";
-	const toggleCls = (on: boolean) =>
-		`${pill} h-9 w-9 ${on ? "bg-white/90 text-black" : "bg-white/10 text-white/85 hover:bg-white/20"}`;
-
 	return (
 		<div
 			style={{
@@ -160,10 +169,23 @@ export default function Recording() {
 				justifyContent: "flex-end",
 			}}
 		>
-			<div className="flex h-[68px] w-full items-center gap-2.5 rounded-2xl bg-[rgba(28,28,30,0.95)] px-3 text-white shadow-[0_10px_36px_rgba(0,0,0,0.45)] backdrop-blur-2xl select-none">
+			<div
+				style={{
+					display: "flex",
+					alignItems: "center",
+					gap: "var(--gap)",
+					height: "100%",
+					padding: "0 8px",
+					background: "var(--surface)",
+					borderRadius: "var(--radius-m)",
+					boxShadow: "var(--shadow-pop)",
+					userSelect: "none",
+				}}
+			>
 				{!status.recording ? (
 					<>
 						<Dropdown
+							light
 							value={source}
 							onChange={setSource}
 							options={sourceOptions}
@@ -173,7 +195,7 @@ export default function Recording() {
 						<button
 							type="button"
 							title={mic ? "Microphone on" : "Microphone off"}
-							className={toggleCls(mic)}
+							style={toolBtn(mic)}
 							onClick={() => setMic((v) => !v)}
 						>
 							{mic ? <Mic size={17} /> : <MicOff size={17} />}
@@ -181,7 +203,7 @@ export default function Recording() {
 						<button
 							type="button"
 							title={camera ? "Camera on" : "Camera off"}
-							className={toggleCls(camera)}
+							style={toolBtn(camera)}
 							onClick={toggleCamera}
 						>
 							{camera ? <Video size={17} /> : <VideoOff size={17} />}
@@ -190,7 +212,20 @@ export default function Recording() {
 							type="button"
 							title="Start recording"
 							onClick={start}
-							className={`${pill} h-9 gap-1.5 bg-[#ff453a] px-3.5 text-[13px] font-semibold text-white hover:bg-[#ff5c52]`}
+							style={{
+								height: "var(--ctrl)",
+								padding: "0 12px",
+								border: "none",
+								borderRadius: "var(--radius-s)",
+								cursor: "pointer",
+								background: "#ff3b30",
+								color: "#fff",
+								fontSize: 13,
+								fontWeight: 600,
+								display: "flex",
+								alignItems: "center",
+								gap: 6,
+							}}
 						>
 							<Circle size={11} fill="currentColor" />
 							Record
@@ -198,28 +233,45 @@ export default function Recording() {
 						<button
 							type="button"
 							title="Close"
+							style={toolBtn(false)}
 							onClick={close}
-							className={`${pill} h-9 w-9 bg-white/10 text-white/70 hover:bg-white/20`}
 						>
 							<X size={16} />
 						</button>
 					</>
 				) : (
 					<>
-						<div className="flex flex-1 items-center gap-2 px-1 text-[13px]">
+						<div
+							style={{
+								display: "flex",
+								flex: 1,
+								alignItems: "center",
+								gap: 8,
+								padding: "0 6px",
+								color: "var(--label)",
+								fontSize: 13,
+							}}
+						>
 							<span
-								className={`h-2.5 w-2.5 rounded-full bg-[#ff453a] ${status.paused ? "" : "animate-pulse"}`}
+								style={{
+									width: 9,
+									height: 9,
+									borderRadius: "50%",
+									background: "#ff3b30",
+								}}
 							/>
-							<span className="tabular-nums font-medium">{mmss}</span>
-							<span className="text-white/55">
-								{status.paused ? "Paused" : ""}
+							<span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>
+								{mmss}
 							</span>
+							{status.paused && (
+								<span style={{ color: "var(--label-2)" }}>Paused</span>
+							)}
 						</div>
 						<button
 							type="button"
 							title={status.paused ? "Resume" : "Pause"}
 							onClick={togglePause}
-							className={`${pill} h-9 w-9 bg-white/10 text-white hover:bg-white/20`}
+							style={toolBtn(false)}
 						>
 							{status.paused ? <Play size={17} /> : <Pause size={17} />}
 						</button>
@@ -227,7 +279,20 @@ export default function Recording() {
 							type="button"
 							title="Stop"
 							onClick={stop}
-							className={`${pill} h-9 gap-1.5 bg-white px-3.5 text-[13px] font-semibold text-black hover:bg-white/90`}
+							style={{
+								height: "var(--ctrl)",
+								padding: "0 12px",
+								border: "none",
+								borderRadius: "var(--radius-s)",
+								cursor: "pointer",
+								background: "var(--accent)",
+								color: "#fff",
+								fontSize: 13,
+								fontWeight: 600,
+								display: "flex",
+								alignItems: "center",
+								gap: 6,
+							}}
 						>
 							<Square size={12} fill="currentColor" />
 							Stop

@@ -35,6 +35,7 @@ export default function Dropdown({
 	minWidth,
 	openUp,
 	onOpenChange,
+	light,
 }: {
 	value: string;
 	options: DropdownOption[];
@@ -44,7 +45,31 @@ export default function Dropdown({
 	openUp?: boolean;
 	/** Notified when the menu opens/closes (e.g. to resize a tiny host window). */
 	onOpenChange?: (open: boolean) => void;
+	/** Light theme — matches the app's capture toolbar (uses styles.css tokens). */
+	light?: boolean;
 }) {
+	// Theme: light reuses the app toolbar tokens (styles.css); dark matches HUD.
+	const t = light
+		? {
+				trigBg: "rgba(0,0,0,0.05)",
+				trigBgOpen: "var(--hover)",
+				text: "var(--label)",
+				menuBg: "var(--surface)",
+				menuShadow: "var(--shadow-pop)",
+				itemText: "var(--label)",
+				itemHover: "var(--hover)",
+				selBg: "var(--accent)",
+			}
+		: {
+				trigBg: "rgba(255,255,255,0.1)",
+				trigBgOpen: "rgba(255,255,255,0.16)",
+				text: "rgba(255,255,255,0.98)",
+				menuBg: "rgba(44,44,46,0.98)",
+				menuShadow: "0 10px 30px rgba(0,0,0,0.5)",
+				itemText: "rgba(255,255,255,0.9)",
+				itemHover: "rgba(255,255,255,0.1)",
+				selBg: "rgba(10,132,255,0.9)",
+			};
 	const [open, setOpen] = useState(false);
 	const ref = useRef<HTMLDivElement>(null);
 
@@ -83,8 +108,8 @@ export default function Dropdown({
 					padding: "0 10px",
 					borderRadius: 7,
 					border: "none",
-					background: open ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.1)",
-					color: "rgba(255,255,255,0.98)",
+					background: open ? t.trigBgOpen : t.trigBg,
+					color: t.text,
 					fontSize: 13,
 					fontFamily: "inherit",
 					cursor: "pointer",
@@ -126,9 +151,9 @@ export default function Dropdown({
 						margin: 0,
 						padding: 4,
 						listStyle: "none",
-						background: "rgba(44,44,46,0.98)",
+						background: t.menuBg,
 						borderRadius: 8,
-						boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
+						boxShadow: t.menuShadow,
 						backdropFilter: "blur(20px)",
 						WebkitBackdropFilter: "blur(20px)",
 						zIndex: 1000,
@@ -148,7 +173,7 @@ export default function Dropdown({
 								onMouseEnter={(e) => {
 									if (!sel)
 										(e.currentTarget as HTMLElement).style.background =
-											"rgba(255,255,255,0.1)";
+											t.itemHover;
 								}}
 								onMouseLeave={(e) => {
 									if (!sel)
@@ -165,8 +190,8 @@ export default function Dropdown({
 									cursor: "pointer",
 									whiteSpace: "nowrap",
 									overflow: "hidden",
-									color: sel ? "#fff" : "rgba(255,255,255,0.9)",
-									background: sel ? "rgba(10,132,255,0.9)" : "transparent",
+									color: sel ? "#fff" : t.itemText,
+									background: sel ? t.selBg : "transparent",
 								}}
 							>
 								{o.swatch && <Swatch bg={o.swatch} />}

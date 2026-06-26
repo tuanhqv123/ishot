@@ -405,6 +405,76 @@ html, body, #root {
   pointer-events: none;
 }
 
+/* --- Corner-crop preview (shown at the TOP of the Background section) --- */
+/* 3 dropdowns (left) + square preview (right) spanning their height. */
+.st-bg-grid {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+}
+.st-bg-grid > .st-bg-controls {
+  flex: 1;
+  min-width: 0;
+}
+/* Fixed-width square; `align-self: stretch` makes its height match the 3 rows.
+   (aspect-ratio collapses to a sliver inside flex, so we set the width.) */
+.st-bg-preview-square {
+  position: relative;
+  flex: 0 0 124px;
+  align-self: stretch;
+  /* Match the dropdowns' span: each st-row has 6px top/bottom padding, so inset
+     the preview by the same so its top/bottom line up with the controls. */
+  margin: 6px 0;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background-size: cover;
+  background-position: center;
+}
+/* The sample "screenshot": only its TOP-LEFT corner shows — it overflows the
+   tile's right & bottom edges. A light macOS-style window with traffic lights
+   so the real rounded corner + padding gap read clearly. */
+.st-bg-preview-corner {
+  position: absolute;
+  right: -80px;
+  bottom: -80px;
+  background: #ececef;
+  overflow: hidden;
+  z-index: 1;
+}
+.st-bg-preview-corner::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  left: 13px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ff5f57;
+  box-shadow: 14px 0 0 #febc2e, 28px 0 0 #28c840;
+}
+.st-bg-preview-corner::after {
+  content: "";
+  position: absolute;
+  top: 34px;
+  left: 13px;
+  width: 150px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.07);
+  box-shadow: 0 13px 0 rgba(0, 0, 0, 0.05), 0 26px 0 rgba(0, 0, 0, 0.05);
+}
+.st-bg-preview-square.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.45;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+  z-index: 0;
+}
+
 /* Compact background-type dropdown. */
 .st-select {
   flex: 1;

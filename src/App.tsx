@@ -9,8 +9,7 @@ import {
 	Circle,
 	Download,
 	Droplet,
-	Fullscreen,
-	GripVertical,
+	Cards,
 	Languages,
 	Mic,
 	MicOff,
@@ -27,13 +26,12 @@ import {
 	VideoOff,
 	X,
 	type LucideIcon,
-} from "lucide-react";
+} from "./icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rough from "roughjs";
 import { getStroke } from "perfect-freehand";
 import { gradientById } from "./gradients";
-import Dropdown from "./Dropdown";
 
 // Cached procedural grain tile, overlaid on gradient/solid backgrounds so the
 // exported image has the same subtle noise texture as the Settings preview.
@@ -748,7 +746,9 @@ function App() {
 	// Record controls live in a Row-2 options bar under the toolbar (like the
 	// draw/blur tool options), opened by the Record (Video) button.
 	const [showRecordOpts, setShowRecordOpts] = useState(false);
-	const [recordSource, setRecordSource] = useState("selection");
+	// Recording always uses the selected region for now (the window/screen
+	// source picker was removed — select a region, then Record).
+	const [recordSource] = useState("selection");
 	const [recordMic, setRecordMic] = useState(false);
 	const [recordCamera, setRecordCamera] = useState(false);
 	// True only while transitioning into a recording, so cancelCapture (called
@@ -850,7 +850,11 @@ function App() {
 		return displayCaptures[getWindowMonitorIndex()] || null;
 	}, [displayCaptures]);
 
-	const renderFinalImage = useCallback(async (): Promise<Uint8Array | null> => {
+	// Returns the finished output CANVAS (crop + annotations + optional
+	// background). Callers decide the encoding: clipboard reads RGBA directly
+	// (no PNG round-trip), save encodes PNG. Keeps the heavy PNG codec off the
+	// common copy path.
+	const renderFinalImage = useCallback(async (): Promise<HTMLCanvasElement | null> => {
 		if (displayCaptures.length === 0 || !selection) return null;
 		const dc = findDisplay();
 		if (!dc) return null;
@@ -1058,29 +1062,33 @@ function App() {
 			exportCanvas = out;
 		}
 
-		// If the background canvas ever ends up tainted (e.g. a future image
-		// source without CORS), toDataURL throws — fall back to the plain crop
-		// so the clipboard copy still succeeds instead of silently failing.
-		let dataUrl: string;
-		try {
-			dataUrl = exportCanvas.toDataURL("image/png");
-		} catch (err) {
-			console.error("background export failed, using plain crop:", err);
-			dataUrl = canvas.toDataURL("image/png");
-		}
-		const base64 = dataUrl.split(",")[1];
-		const binary = atob(base64);
-		const bytes = new Uint8Array(binary.length);
-		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-		return bytes;
+		return exportCanvas;
 	}, [displayCaptures, selection, annotations, findDisplay, appearance]);
 
 	const handleDone = useCallback(async () => {
-		const bytes = await renderFinalImage();
-		if (bytes) {
+		const cv = await renderFinalImage();
+		if (!cv) return;
+		try {
+			// Copy via RAW RGBA (no PNG encode in JS, no PNG decode in Rust).
+			// Layout: [width u32 LE][height u32 LE][RGBA bytes…], sent as the
+			// invoke raw body (Tauri v2 transfers Uint8Array as binary).
+			const ctx = cv.getContext("2d")!;
+			const img = ctx.getImageData(0, 0, cv.width, cv.height);
+			const payload = new Uint8Array(8 + img.data.byteLength);
+			const dv = new DataView(payload.buffer);
+			dv.setUint32(0, cv.width, true);
+			dv.setUint32(4, cv.height, true);
+			payload.set(new Uint8Array(img.data.buffer), 8);
+			await invoke("copy_image_rgba", payload);
+		} catch (e) {
+			console.error("copy_image_rgba failed, falling back to PNG:", e);
+			const url = cv.toDataURL("image/png");
+			const bin = atob(url.split(",")[1]);
+			const bytes = new Uint8Array(bin.length);
+			for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 			await invoke("copy_to_clipboard", { imageBytes: Array.from(bytes) });
-			await cancelCapture();
 		}
+		await cancelCapture();
 	}, [renderFinalImage, cancelCapture]);
 
 	const toggleRecordCamera = useCallback(() => {
@@ -1141,14 +1149,19 @@ function App() {
 	]);
 
 	const handleSave = useCallback(async () => {
-		const bytes = await renderFinalImage();
-		if (bytes) {
-			try {
-				await invoke("save_to_file", { imageBytes: Array.from(bytes) });
-				await cancelCapture();
-			} catch (e) {
-				console.error(e);
-			}
+		const cv = await renderFinalImage();
+		if (!cv) return;
+		try {
+			const blob = await new Promise<Blob | null>((r) =>
+				cv.toBlob(r, "image/png"),
+			);
+			if (!blob) return;
+			const buf = new Uint8Array(await blob.arrayBuffer());
+			// Raw body (Uint8Array) — no Array.from / JSON serialization.
+			await invoke("save_to_file", buf);
+			await cancelCapture();
+		} catch (e) {
+			console.error(e);
 		}
 	}, [renderFinalImage, cancelCapture]);
 
@@ -1197,9 +1210,10 @@ function App() {
 			const binary = atob(base64);
 			const bytes = new Uint8Array(binary.length);
 			for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-			const result = await invoke<{ blocks: TextBlock[] }>("perform_ocr", {
-				pngData: Array.from(bytes),
-			});
+			const result = await invoke<{ blocks: TextBlock[] }>(
+				"perform_ocr",
+				bytes,
+			);
 			setTextBlocks(
 				result.blocks.map((b) => ({
 					...b,
@@ -1335,7 +1349,7 @@ function App() {
 			const ocrResult = await invoke<{
 				blocks: { text: string }[];
 				full_text: string;
-			}>("perform_ocr", { pngData: Array.from(bytes) });
+			}>("perform_ocr", bytes);
 			const sourceText =
 				ocrResult.full_text || ocrResult.blocks.map((b) => b.text).join(" ");
 			setAiSeedText(sourceText);
@@ -1569,7 +1583,7 @@ function App() {
 			const ocrResult = await invoke<{
 				blocks: { text: string }[];
 				full_text: string;
-			}>("perform_ocr", { pngData: Array.from(bytes) });
+			}>("perform_ocr", bytes);
 			const sourceText =
 				ocrResult.full_text || ocrResult.blocks.map((b) => b.text).join(" ");
 			if (!sourceText.trim()) {
@@ -3400,30 +3414,23 @@ function App() {
 								alignItems: "center" as const,
 								boxShadow: "var(--shadow-pop)",
 								zIndex: 100,
+								cursor: "grab" as const,
+							};
+							// Drag the toolbar by clicking its background (padding / gaps).
+							// Mousedowns on buttons keep working — only the bar itself
+							// (target === currentTarget) starts a move, so there's no
+							// separate grip handle cluttering row 1.
+							const onBarDrag = (e: React.MouseEvent) => {
+								if (e.target === e.currentTarget) onToolbarDragStart(e);
 							};
 							return (
 								<>
-									{/* Row 1: Tools + actions */}
-									<div ref={toolbarRow1Ref} style={{ ...barStyle, top: row1Top }}>
-										{/* Drag handle — lets the user move the toolbar when the
-										    default position is unreachable (e.g. a full-screen
-										    selection centers it under the MacBook notch). */}
-										<div
-											onMouseDown={onToolbarDragStart}
-											title="Move toolbar"
-											style={{
-												display: "flex",
-												alignItems: "center",
-												justifyContent: "center",
-												width: 16,
-												height: 32,
-												cursor: "grab",
-												color: "rgba(0,0,0,0.3)",
-												flexShrink: 0,
-											}}
-										>
-											<GripVertical size={14} />
-										</div>
+									{/* Row 1: Tools + actions. Click the bar background to drag. */}
+									<div
+										ref={toolbarRow1Ref}
+										onMouseDown={onBarDrag}
+										style={{ ...barStyle, top: row1Top }}
+									>
 										{/* "Shapes" entry button — opens the options row below where
 										    the individual shapes (square/circle/arrow/line/draw) live. */}
 										<ToolBtn
@@ -3463,7 +3470,7 @@ function App() {
 											onClick={handleStartScroll}
 											title="Scroll capture — scroll the page yourself, Esc to finish"
 										>
-											<ToolIcon icon={Fullscreen} />
+											<ToolIcon icon={Cards} />
 										</ToolBtn>
 										<ToolBtn
 											onClick={handleTranslate}
@@ -3529,14 +3536,12 @@ function App() {
 									{hasRow2 && (
 										<div
 											ref={toolbarRow2Ref}
+											onMouseDown={onBarDrag}
 											style={{
 												...barStyle,
 												top: row2Top,
 											}}
 										>
-											{/* Spacer matching row 1's drag grip (16px) so the options
-											    line up under the tool buttons instead of shifting left. */}
-											<div style={{ width: 16, flexShrink: 0 }} />
 											{/* Shape row: the shapes themselves as individual buttons,
 											    then stroke weight → sloppiness → color. */}
 											{isShapeTool && (
@@ -3743,24 +3748,6 @@ function App() {
 														padding: "0 4px",
 													}}
 												>
-													<Dropdown
-														light
-														value={recordSource}
-														onChange={setRecordSource}
-														minWidth={150}
-														options={[
-															...(selection
-																? [{ value: "selection", label: "Selection" }]
-																: []),
-															{ value: "screen:0", label: "Entire screen" },
-															...snappedWindows.slice(0, 30).map((w) => ({
-																value: `window:${w.id}`,
-																label: w.title
-																	? `${w.app_name} — ${w.title}`
-																	: w.app_name,
-															})),
-														]}
-													/>
 													<ToolBtn
 														active={recordMic}
 														onClick={() => setRecordMic((v) => !v)}
@@ -3794,7 +3781,7 @@ function App() {
 															gap: 6,
 														}}
 													>
-														<Circle size={10} fill="currentColor" />
+														<Circle size={10} weight="fill" />
 														Record
 													</button>
 												</div>
@@ -4336,9 +4323,9 @@ function App() {
 													}
 												>
 													{aiStreaming ? (
-														<Square size={9} fill="currentColor" />
+														<Square size={11} weight="fill" />
 													) : (
-														<ArrowUp size={14} strokeWidth={2.5} />
+														<ArrowUp size={16} weight="fill" />
 													)}
 												</button>
 											</div>
@@ -4548,9 +4535,9 @@ function ToolIcon({ icon: Icon, box = 18 }: { icon: LucideIcon; box?: number }) 
 		const svg = ref.current?.querySelector("svg") as SVGGraphicsElement | null;
 		if (!svg) return;
 		try {
-			const bb = svg.getBBox(); // viewBox units (0..24), size-independent
+			const bb = svg.getBBox(); // viewBox units (Phosphor: 0..256)
 			const m = Math.max(bb.width, bb.height);
-			if (m > 0) setSize((box * 24) / m);
+			if (m > 0) setSize((box * 256) / m);
 		} catch {
 			/* getBBox throws if not laid out yet — keep default size */
 		}
@@ -4566,7 +4553,7 @@ function ToolIcon({ icon: Icon, box = 18 }: { icon: LucideIcon; box?: number }) 
 				justifyContent: "center",
 			}}
 		>
-			<Icon size={size} absoluteStrokeWidth strokeWidth={2} />
+			<Icon size={size} weight="regular" />
 		</span>
 	);
 }

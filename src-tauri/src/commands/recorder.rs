@@ -128,6 +128,9 @@ fn show_preview(app: &AppHandle, path: &str) {
         .inner_size(w, h)
         .position(x, y)
         .decorations(false)
+        // Transparent + rounded root (clipped in the webview) so the window has
+        // rounded corners like the Settings / Clipboard-History panels.
+        .transparent(true)
         .resizable(true)
         .visible(true)
         .build();
@@ -149,11 +152,16 @@ pub async fn save_recording(
     end: Option<f64>,
 ) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
-    let name = std::path::Path::new(&path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("recording.mov")
-        .to_string();
+    // Default name: video_<timestamp>_<random id>.mov (no "ishot" prefix).
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let id = format!(
+        "{:08x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    );
+    let name = format!("video_{}_{}.mov", ts, id);
     let dest = app
         .dialog()
         .file()
@@ -219,6 +227,8 @@ pub fn open_camera_bubble(app: AppHandle) {
         .position(x, y)
         .decorations(false)
         .transparent(true)
+        // No macOS window shadow — just the round camera circle.
+        .shadow(false)
         .always_on_top(true)
         .resizable(false)
         .visible(true)

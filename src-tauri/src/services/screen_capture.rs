@@ -79,8 +79,9 @@ impl ScreenCaptureService {
         let start = Instant::now();
         let temp_path = format!("/tmp/ishot_d{}.png", display_num);
 
+        // No `-C`: omitting it keeps the mouse cursor OUT of the capture.
         let status = Command::new("screencapture")
-            .args(["-x", "-C", "-t", "png", "-D", &display_num.to_string(), &temp_path])
+            .args(["-x", "-t", "png", "-D", &display_num.to_string(), &temp_path])
             .status()
             .map_err(|e| AppError::ScreenCapture(format!("screencapture -D{} failed: {}", display_num, e)))?;
 

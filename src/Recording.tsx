@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Pause, Play, Square } from "lucide-react";
+import { Pause, Play, Square } from "./icons";
 
 interface RecordingStatus {
 	recording: boolean;
@@ -140,7 +140,7 @@ export default function Recording() {
 						fontWeight: 600,
 					}}
 				>
-					<Square size={11} fill="currentColor" />
+					<Square size={11} weight="fill" />
 					Stop
 				</button>
 			</div>

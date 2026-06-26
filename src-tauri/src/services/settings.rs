@@ -50,9 +50,10 @@ pub struct AppearanceConfig {
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self {
+            // Off by default — plain captures stay fast; compositing is opt-in.
             enabled: false,
             kind: "gradient".to_string(),
-            value: "".to_string(),
+            value: "peach".to_string(),
             padding: 64,
             radius: 16,
             shadow: true,

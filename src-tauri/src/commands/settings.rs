@@ -52,3 +52,28 @@ pub async fn set_api_key(key: String) -> Result<(), String> {
 pub async fn clear_api_key() -> Result<(), String> {
     keychain::clear_api_key()
 }
+
+/// Current app version (from Cargo.toml), shown in the Settings footer.
+#[tauri::command]
+pub fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Whether "launch at login" (autostart LaunchAgent) is currently enabled.
+#[tauri::command]
+pub fn get_autostart(app: AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+/// Enable/disable "launch at login". Moved out of the tray menu into Settings.
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let al = app.autolaunch();
+    if enabled {
+        al.enable().map_err(|e| e.to_string())
+    } else {
+        al.disable().map_err(|e| e.to_string())
+    }
+}

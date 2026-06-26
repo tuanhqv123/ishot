@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown } from "./icons";
 
 export interface DropdownOption {
 	value: string;
 	label: string;
 	/** Optional CSS background (color or gradient) shown as a swatch chip. */
 	swatch?: string;
+	/** Non-selectable group label (e.g. "Dark", "Light"). */
+	header?: boolean;
 }
 
 function Swatch({ bg }: { bg: string }) {
@@ -36,6 +38,7 @@ export default function Dropdown({
 	openUp,
 	onOpenChange,
 	light,
+	maxHeight = 260,
 }: {
 	value: string;
 	options: DropdownOption[];
@@ -47,6 +50,9 @@ export default function Dropdown({
 	onOpenChange?: (open: boolean) => void;
 	/** Light theme — matches the app's capture toolbar (uses styles.css tokens). */
 	light?: boolean;
+	/** Cap the menu height so a long list scrolls instead of overflowing its
+	 *  host window (e.g. the fixed-height Settings panel). */
+	maxHeight?: number;
 }) {
 	// Theme: light reuses the app toolbar tokens (styles.css); dark matches HUD.
 	const t = light
@@ -71,9 +77,13 @@ export default function Dropdown({
 				selBg: "rgba(10,132,255,0.9)",
 			};
 	const [open, setOpen] = useState(false);
-	const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(
-		null,
-	);
+	const [pos, setPos] = useState<{
+		left: number;
+		width: number;
+		maxH: number;
+		top?: number;
+		bottom?: number;
+	} | null>(null);
 	const ref = useRef<HTMLDivElement>(null);
 	const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -82,12 +92,22 @@ export default function Dropdown({
 		// by the Settings panel's scroll/overflow (which hid the lower options).
 		if (v && triggerRef.current) {
 			const r = triggerRef.current.getBoundingClientRect();
-			const estH = Math.min(260, options.length * 32 + 8);
-			setPos({
-				top: openUp ? r.top - estH - 4 : r.bottom + 4,
-				left: r.left,
-				width: r.width,
-			});
+			const margin = 8;
+			const desiredH = Math.min(maxHeight, options.length * 34 + 8);
+			const spaceBelow = window.innerHeight - r.bottom - margin;
+			const spaceAbove = r.top - margin;
+			// Open downward by default; flip up only when there isn't room below
+			// AND there's more room above. `openUp` forces a direction when set.
+			const up = openUp ?? (spaceBelow < desiredH && spaceAbove > spaceBelow);
+			const maxH = Math.max(96, Math.min(desiredH, up ? spaceAbove : spaceBelow));
+			// Anchor the EDGE adjacent to the trigger (top when down, bottom when
+			// up) so the menu always sits flush against it — no floating gap,
+			// regardless of how tall the rendered list ends up being.
+			setPos(
+				up
+					? { left: r.left, width: r.width, maxH, bottom: window.innerHeight - r.top + 4 }
+					: { left: r.left, width: r.width, maxH, top: r.bottom + 4 },
+			);
 		}
 		setOpen(v);
 		onOpenChange?.(v);
@@ -95,12 +115,19 @@ export default function Dropdown({
 
 	useEffect(() => {
 		if (!open) return;
-		const close = (e: MouseEvent) => {
+		const close = (e: Event) => {
 			if (ref.current && !ref.current.contains(e.target as Node))
 				setOpenNotify(false);
 		};
 		document.addEventListener("mousedown", close);
-		return () => document.removeEventListener("mousedown", close);
+		// The menu is position:fixed, so it doesn't follow when the host (e.g.
+		// the Settings body) scrolls — it'd float detached. Close on any scroll
+		// outside the menu itself (internal menu scrolling is ignored).
+		window.addEventListener("scroll", close, true);
+		return () => {
+			document.removeEventListener("mousedown", close);
+			window.removeEventListener("scroll", close, true);
+		};
 	}, [open]);
 
 	const current = options.find((o) => o.value === value);
@@ -159,9 +186,10 @@ export default function Dropdown({
 					style={{
 						position: "fixed",
 						top: pos.top,
+						bottom: pos.bottom,
 						left: pos.left,
 						width: pos.width,
-						maxHeight: 260,
+						maxHeight: pos.maxH,
 						overflowY: "auto",
 						margin: 0,
 						padding: 4,
@@ -172,7 +200,28 @@ export default function Dropdown({
 						zIndex: 1000,
 					}}
 				>
-					{options.map((o) => {
+					{options.map((o, i) => {
+						// Non-selectable group label.
+						if (o.header) {
+							return (
+								<li
+									key={`h:${o.label}:${i}`}
+									role="presentation"
+									style={{
+										padding: "8px 10px 4px",
+										fontSize: 10.5,
+										fontWeight: 700,
+										letterSpacing: "0.06em",
+										textTransform: "uppercase",
+										color: t.itemText,
+										opacity: 0.5,
+										cursor: "default",
+									}}
+								>
+									{o.label}
+								</li>
+							);
+						}
 						const sel = o.value === value;
 						return (
 							<li

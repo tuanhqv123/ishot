@@ -25,18 +25,21 @@ export default function Camera() {
 	return (
 		<div
 			data-tauri-drag-region
-			className="flex h-screen w-screen items-center justify-center overflow-hidden rounded-full bg-black shadow-[0_8px_30px_rgba(0,0,0,0.45)]"
-			style={{ boxShadow: "0 8px 30px rgba(0,0,0,0.45), inset 0 0 0 2px rgba(255,255,255,0.15)" }}
+			className="flex h-screen w-screen items-center justify-center overflow-hidden rounded-full bg-black"
 		>
 			{error ? (
-				<span className="px-3 text-center text-[11px] text-white/70">{error}</span>
+				<span className="pointer-events-none px-3 text-center text-[11px] text-white/70">
+					{error}
+				</span>
 			) : (
 				<video
 					ref={videoRef}
 					autoPlay
 					playsInline
 					muted
-					className="h-full w-full object-cover"
+					// pointer-events:none so mousedown falls through to the parent
+					// drag region → the whole bubble is draggable anywhere.
+					className="pointer-events-none h-full w-full object-cover"
 					style={{ transform: "scaleX(-1)" }}
 				/>
 			)}

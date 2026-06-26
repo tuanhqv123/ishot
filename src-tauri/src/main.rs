@@ -9,10 +9,10 @@ mod services;
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use tauri::{Emitter, Listener, Manager};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, CheckMenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, Code, ShortcutState};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_autostart::MacosLauncher;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use crate::services::scroll_capture::ScrollCaptureState;
@@ -455,8 +455,8 @@ fn main() {
                 }
             }
 
-            let autostart = app.autolaunch();
-            let is_enabled = autostart.is_enabled().unwrap_or(false);
+            // "Launch at Login" moved into Settings (get_autostart/set_autostart),
+            // so the tray no longer reads or toggles it here.
 
             let shortcut_display = {
                 let s = state.lock().unwrap();
@@ -468,9 +468,8 @@ fn main() {
             //   Capture                 — invoke screenshot directly
             //   Clipboard History       — open the spotlight panel directly
             //   ─────────────
-            //   Settings…
+            //   Settings…           (Launch at Login lives inside Settings now)
             //   Check for Updates…
-            //   Launch at Login (check)
             //   ─────────────
             //   Quit iShot
             let capture_i = MenuItem::with_id(app, "capture", "Capture", true, None::<&str>)?;
@@ -479,7 +478,6 @@ fn main() {
             let separator1 = PredefinedMenuItem::separator(app)?;
             let settings_i = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let check_update_i = MenuItem::with_id(app, "check_update", "Check for Updates…", true, None::<&str>)?;
-            let launch_i = CheckMenuItem::with_id(app, "launch_at_login", "Launch at Login", true, is_enabled, None::<&str>)?;
             let separator2 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit iShot", true, None::<&str>)?;
 
@@ -492,7 +490,6 @@ fn main() {
                     &separator1,
                     &settings_i,
                     &check_update_i,
-                    &launch_i,
                     &separator2,
                     &quit_i,
                 ],
@@ -526,15 +523,6 @@ fn main() {
                             // so just open the capture overlay; the user picks the
                             // Record (Video) tool there.
                             trigger_screenshot(app);
-                        }
-                        "launch_at_login" => {
-                            let autostart = app.autolaunch();
-                            let is_enabled = autostart.is_enabled().unwrap_or(false);
-                            if is_enabled {
-                                let _ = autostart.disable();
-                            } else {
-                                let _ = autostart.enable();
-                            }
                         }
                         "clipboard_history" => {
                             services::clipboard_panel::toggle(app);
@@ -654,6 +642,7 @@ fn main() {
             commands::window::show_scroll_border,
             commands::window::hide_scroll_border,
             commands::file::copy_to_clipboard,
+            commands::file::copy_image_rgba,
             commands::file::copy_text_to_clipboard,
             commands::file::save_to_file,
             commands::ocr::perform_ocr,
@@ -680,10 +669,14 @@ fn main() {
             commands::settings::set_api_key,
             commands::settings::clear_api_key,
             commands::settings::open_settings,
+            commands::settings::get_app_version,
+            commands::settings::get_autostart,
+            commands::settings::set_autostart,
             commands::ai_chat::ai_chat_stream,
             commands::ai_chat::list_ai_models,
             commands::appearance::get_desktop_wallpaper_path,
             commands::appearance::read_image_as_data_url,
+            commands::appearance::pick_background_image,
             commands::hud::show_hud,
             commands::recorder::list_capture_targets,
             commands::recorder::recording_status,

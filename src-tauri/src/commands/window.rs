@@ -161,6 +161,8 @@ pub async fn show_scroll_panel(
     .position(x, y)
     .decorations(false)
     .transparent(true)
+    // No macOS window shadow around the live preview thumbnail.
+    .shadow(false)
     .always_on_top(true)
     .resizable(false)
     .visible(true)

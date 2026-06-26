@@ -5,6 +5,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 type HistoryItem = {
   path: string;
   kind: "image" | "text";
+  // Small cached thumbnail for fast list rendering (images only).
+  thumb?: string | null;
   // Other backend fields (created_at_ms, size_bytes, width, height) are
   // intentionally unused — the UI shows content only, no metadata.
 };
@@ -207,7 +209,12 @@ function Card({
         ×
       </button>
       {item.kind === "image" ? (
-        <img className="ch-img" src={convertFileSrc(item.path)} alt="" />
+        <img
+          className="ch-img"
+          src={convertFileSrc(item.thumb || item.path)}
+          alt=""
+          decoding="async"
+        />
       ) : (
         <div className="ch-text">
           {text === undefined ? "…" : text.length > 400 ? text.slice(0, 400) + "…" : text}

@@ -6,10 +6,12 @@ impl TranslateService {
     /// Translate text using Google Translate's free endpoint.
     /// Auto-detects source language, translates to `target_lang` (e.g. "en", "vi", "ja").
     pub async fn translate(text: &str, target_lang: &str) -> Result<TranslateResult> {
+        // POST (q in the form body), NOT GET with q in the URL — long text would
+        // overflow the URL length limit and Google returns an empty/HTML body
+        // → the user sees "nothing translated" for big selections.
         let url = format!(
-            "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={}&dt=t&q={}",
+            "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={}&dt=t",
             target_lang,
-            urlencoding(text)
         );
 
         // Use reqwest (rustls) with a browser User-Agent. The previous `curl`
@@ -27,7 +29,8 @@ impl TranslateService {
             .map_err(|e| AppError::ScreenCapture(format!("translation client: {}", e)))?;
 
         let resp = client
-            .get(&url)
+            .post(&url)
+            .form(&[("q", text)])
             .send()
             .await
             .map_err(|e| AppError::ScreenCapture(format!("translation request failed: {}", e)))?;
@@ -135,19 +138,4 @@ pub struct TranslateResult {
     pub translated: String,
     pub source_lang: String,
     pub target_lang: String,
-}
-
-/// Simple URL encoding for query parameters
-fn urlencoding(s: &str) -> String {
-    let mut result = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            b' ' => result.push_str("%20"),
-            _ => result.push_str(&format!("%{:02X}", b)),
-        }
-    }
-    result
 }

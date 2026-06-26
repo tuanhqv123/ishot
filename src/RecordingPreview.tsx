@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { X } from "lucide-react";
+import { X } from "./icons";
 
 // Post-record preview with a TRIM strip: drag the two handles to set start/end;
 // Save exports only that range (and closes the window).
@@ -154,15 +154,15 @@ export default function RecordingPreview() {
 	});
 
 	return (
-		<div className="flex h-screen w-screen flex-col gap-3 bg-[rgba(24,24,26,0.99)] p-4 text-white select-none">
-			<div className="flex items-center justify-between">
-				<span className="text-[13px] font-semibold">Recording preview</span>
+		<div className="flex h-screen w-screen flex-col gap-2.5 overflow-hidden rounded-[14px] bg-[rgba(24,24,26,0.99)] p-3 text-white select-none">
+			{/* No title — just a draggable strip with a plain icon close button. */}
+			<div data-tauri-drag-region className="flex items-center justify-end">
 				<button
 					type="button"
 					onClick={() => getCurrentWindow().close()}
-					className="flex h-7 w-7 items-center justify-center rounded-full bg-white/10 text-white/70 hover:bg-white/20"
+					className="flex items-center justify-center text-white/45 hover:text-white"
 				>
-					<X size={15} />
+					<X size={16} />
 				</button>
 			</div>
 

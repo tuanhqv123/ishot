@@ -18,6 +18,19 @@ pub struct HistoryItem {
     pub size_bytes: u64,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Small cached thumbnail path for fast list rendering (images only).
+    pub thumb: Option<String>,
+}
+
+/// Cached thumbnail path: `<dir>/thumbs/<name>.jpg`. NON-hidden dir on purpose —
+/// the asset-protocol glob (`/tmp/ishot_*/**`) doesn't match dot-prefixed paths.
+fn thumb_path_for(image: &Path) -> Option<std::path::PathBuf> {
+    let name = image.file_name()?.to_str()?;
+    Some(
+        Path::new(CLIPBOARD_DIR)
+            .join("thumbs")
+            .join(format!("{name}.jpg")),
+    )
 }
 
 #[tauri::command]
@@ -59,6 +72,14 @@ pub async fn list_clipboard_history() -> Result<Vec<HistoryItem>, String> {
         } else {
             (None, None)
         };
+        // Use a cached thumbnail if it already exists (fast list render).
+        let thumb = if kind == "image" {
+            thumb_path_for(&path)
+                .filter(|t| t.exists())
+                .map(|t| t.to_string_lossy().to_string())
+        } else {
+            None
+        };
         items.push(HistoryItem {
             path: path.to_string_lossy().to_string(),
             kind: kind.to_string(),
@@ -66,10 +87,38 @@ pub async fn list_clipboard_history() -> Result<Vec<HistoryItem>, String> {
             size_bytes: meta.len(),
             width,
             height,
+            thumb,
         });
     }
     items.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
     items.truncate(200);
+
+    // Generate any MISSING thumbnails in the background so this call returns
+    // immediately; they appear on the next refresh (~2s). Decoding full-res
+    // PNGs to render the list directly was the cause of the slow open.
+    let missing: Vec<String> = items
+        .iter()
+        .filter(|it| it.kind == "image" && it.thumb.is_none())
+        .map(|it| it.path.clone())
+        .collect();
+    if !missing.is_empty() {
+        std::thread::spawn(move || {
+            let _ = std::fs::create_dir_all(Path::new(CLIPBOARD_DIR).join("thumbs"));
+            for p in missing {
+                let src = Path::new(&p);
+                let Some(dst) = thumb_path_for(src) else { continue };
+                if dst.exists() {
+                    continue;
+                }
+                if let Ok(img) = image::open(src) {
+                    // ~320px longest side keeps the list crisp but tiny to decode.
+                    let thumb = img.thumbnail(320, 320);
+                    let _ = thumb.to_rgb8().save(&dst);
+                }
+            }
+        });
+    }
+
     Ok(items)
 }
 

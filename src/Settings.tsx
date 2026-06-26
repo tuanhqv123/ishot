@@ -36,9 +36,11 @@ type SettingsT = {
 // Defaults applied in code when an older settings.json lacks `appearance`, so the
 // controls render and the next save persists it.
 const DEFAULT_APPEARANCE: AppearanceConfig = {
+  // Off by default ("None") — keeps plain captures fast. Compositing onto a
+  // wallpaper/gradient (bigger canvas + image decode) is opt-in.
   enabled: false,
   kind: "gradient",
-  value: "",
+  value: "peach",
   padding: 64,
   radius: 16,
   shadow: true,
@@ -57,6 +59,7 @@ function nearest(v: number, opts: { value: string }[]): string {
 // ids + color stops (preview == exported image).
 
 // Solid-color swatches. Persisted as appearance.value = the hex string.
+// 7 basic solid colours.
 const COLOR_PRESETS: string[] = [
   "#ffffff",
   "#f2f2f7",
@@ -64,6 +67,7 @@ const COLOR_PRESETS: string[] = [
   "#0a84ff",
   "#ff375f",
   "#30d158",
+  "#ff9f0a",
 ];
 const COLOR_LABELS: Record<string, string> = {
   "#ffffff": "White",
@@ -72,6 +76,7 @@ const COLOR_LABELS: Record<string, string> = {
   "#0a84ff": "Blue",
   "#ff375f": "Pink",
   "#30d158": "Green",
+  "#ff9f0a": "Orange",
 };
 // Radius/padding as easy preset options (instead of fiddly sliders).
 const RADIUS_OPTIONS = [
@@ -195,35 +200,43 @@ export default function Settings() {
   const [settings, setSettings] = useState<SettingsT | null>(null);
   const [hasKey, setHasKey] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
-  const [savingKey, setSavingKey] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  // Available model ids fetched from {base_url}/models. Populates the
-  // datalist hint dropdown next to the model input; the input itself stays
-  // free-form so users can also type a model id manually (handy for unlisted
-  // proxy endpoints).
+  // Model ids fetched from {base_url}/models — populated automatically whenever
+  // the base URL / API key changes (no manual "Fetch" button). Shown in a
+  // standard Dropdown like the other settings.
   const [availableModels, setAvailableModels] = useState<string[]>([]);
-  const [fetchingModels, setFetchingModels] = useState(false);
-  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
-  // Anchor for the model dropdown — used to pin the floating list directly
-  // under the input with `position: fixed`, avoiding parent overflow clipping.
-  const modelInputRef = useRef<HTMLInputElement | null>(null);
-  const [modelDropdownPos, setModelDropdownPos] = useState<{
-    top: number;
-    left: number;
-    width: number;
-  } | null>(null);
-
-  const computeDropdownPos = useCallback(() => {
-    const el = modelInputRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    setModelDropdownPos({ top: r.bottom + 4, left: r.left, width: r.width });
-  }, []);
 
   // Resolved file:// src for the current desktop wallpaper, cached so the live
   // preview can render it. Fetched lazily when the "Current wallpaper" kind is
   // chosen (or already active on load).
   const [wallpaperSrc, setWallpaperSrc] = useState<string | null>(null);
+
+  // "Launch at login" (moved here from the tray menu) + the running version,
+  // shown in the footer.
+  const [autostart, setAutostart] = useState(false);
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        setAutostart(await invoke<boolean>("get_autostart"));
+        setVersion(await invoke<string>("get_app_version"));
+      } catch (e) {
+        console.error("load autostart/version failed", e);
+      }
+    })();
+  }, []);
+
+  const toggleAutostart = async () => {
+    const next = !autostart;
+    setAutostart(next);
+    try {
+      await invoke("set_autostart", { enabled: next });
+    } catch (e) {
+      console.error("set_autostart failed", e);
+      setAutostart(!next); // revert on failure
+    }
+  };
 
   const loadWallpaper = useCallback(async () => {
     try {
@@ -292,6 +305,37 @@ export default function Settings() {
     return () => clearTimeout(t);
   }, [settings, loaded]);
 
+  // Auto-save the API key as the user types (debounced) — no Save button.
+  // Empty input is left alone (it just means "unchanged"), so the stored key
+  // isn't wiped by an empty field.
+  useEffect(() => {
+    if (!loaded) return;
+    const key = apiKeyInput.trim();
+    if (!key) return;
+    const t = setTimeout(() => {
+      invoke("set_api_key", { key })
+        .then(() => setHasKey(true))
+        .catch((e) => {
+          console.error("set_api_key failed", e);
+          setStatus(`API key save failed: ${e}`);
+        });
+    }, 600);
+    return () => clearTimeout(t);
+  }, [apiKeyInput, loaded]);
+
+  // Auto-fetch the model list whenever the base URL / API key changes
+  // (debounced) — no manual "Fetch" button.
+  const baseUrl = settings?.ai.base_url ?? "";
+  useEffect(() => {
+    if (!loaded || !baseUrl.trim()) return;
+    const t = setTimeout(() => {
+      invoke<string[]>("list_ai_models", { baseUrl, apiKey: apiKeyInput })
+        .then((ids) => setAvailableModels(ids))
+        .catch((e) => console.error("list_ai_models failed", e));
+    }, 700);
+    return () => clearTimeout(t);
+  }, [baseUrl, apiKeyInput, hasKey, loaded]);
+
   if (!loaded || !settings) {
     return <div className="st-root"><div className="st-loading">Loading…</div></div>;
   }
@@ -316,23 +360,10 @@ export default function Settings() {
   // underlying command directly). Returns a single absolute path or null.
   const pickCustomImage = async () => {
     try {
-      const selected = await invoke<string | string[] | null>(
-        "plugin:dialog|open",
-        {
-          options: {
-            multiple: false,
-            directory: false,
-            filters: [
-              {
-                name: "Images",
-                extensions: ["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp", "tiff"],
-              },
-            ],
-          },
-        },
-      );
-      const path = Array.isArray(selected) ? selected[0] : selected;
-      if (path) updateAppearance({ kind: "image", value: path });
+      // Native picker (Rust): suppresses the Settings panel's resign-key
+      // auto-hide while the NSOpenPanel is up, so Finder actually appears.
+      const path = await invoke<string | null>("pick_background_image");
+      if (path) updateAppearance({ enabled: true, kind: "image", value: path });
     } catch (e) {
       console.error("image picker failed", e);
       setStatus(`Could not open file picker: ${e}`);
@@ -340,82 +371,37 @@ export default function Settings() {
   };
 
   const selectWallpaper = () => {
-    updateAppearance({ kind: "wallpaper", value: "" });
-    if (!wallpaperSrc) loadWallpaper();
+    updateAppearance({ enabled: true, kind: "wallpaper", value: "" });
+    loadWallpaper(); // always re-read so it reflects the CURRENT wallpaper
   };
 
-  // Background-type dropdown: switch kind, keeping/seeding a sensible value.
-  const onKindChange = (kind: AppearanceKind) => {
-    const v = settings.appearance.value;
-    if (kind === "gradient")
-      updateAppearance({
-        kind,
-        value: GRADIENT_PRESETS.some((g) => g.id === v) ? v : GRADIENT_PRESETS[0].id,
-      });
-    else if (kind === "color")
-      updateAppearance({ kind, value: /^#/.test(v) ? v : COLOR_PRESETS[0] });
-    else if (kind === "wallpaper") selectWallpaper();
-    else {
-      // Custom image → switch kind AND open the file picker right away (so it's
-      // not just a dead "Choose image…" button the user has to find).
-      updateAppearance({ kind: "image" });
-      if (!v || GRADIENT_PRESETS.some((g) => g.id === v) || /^#/.test(v)) {
-        pickCustomImage();
-      }
-    }
+  // ONE unified background picker. "none" turns the backdrop off; everything
+  // else turns it on. Value is prefixed: g:<id> / c:<hex> / wallpaper / image /
+  // none. Decodes the selection into enabled + kind + value.
+  const onBgChange = (v: string) => {
+    if (v === "none") updateAppearance({ enabled: false });
+    else if (v.startsWith("g:"))
+      updateAppearance({ enabled: true, kind: "gradient", value: v.slice(2) });
+    else if (v.startsWith("c:"))
+      updateAppearance({ enabled: true, kind: "color", value: v.slice(2) });
+    else if (v === "wallpaper") selectWallpaper();
+    // Open the picker right away; pickCustomImage commits kind+value only once
+    // a file is actually chosen (cancel = no change, no blank image background).
+    else if (v === "image") pickCustomImage();
   };
 
   const app = settings.appearance;
-  const previewBg = backgroundCss(app, wallpaperSrc);
+  // When "None" (disabled), the preview shows a neutral tile with the bare shot.
+  const previewBg = app.enabled ? backgroundCss(app, wallpaperSrc) : "#2c2c2e";
 
-  const onSaveKey = async () => {
-    if (!apiKeyInput.trim()) return;
-    setSavingKey(true);
-    try {
-      await invoke("set_api_key", { key: apiKeyInput });
-      setApiKeyInput("");
-      setHasKey(true);
-    } catch (e) {
-      console.error(e);
-      setStatus(`API key save failed: ${e}`);
-    } finally {
-      setSavingKey(false);
-    }
-  };
-
-  const onClearKey = async () => {
-    try {
-      await invoke("clear_api_key");
-      setHasKey(false);
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const onFetchModels = async () => {
-    if (!settings) return;
-    setFetchingModels(true);
-    setStatus(null);
-    try {
-      // Pass the in-flight base_url + api_key (if just typed) explicitly so the
-      // user can probe a provider BEFORE pressing Save. Backend falls back to
-      // the keychain-stored key when apiKeyInput is empty.
-      const ids = await invoke<string[]>("list_ai_models", {
-        baseUrl: settings.ai.base_url,
-        apiKey: apiKeyInput,
-      });
-      setAvailableModels(ids);
-      computeDropdownPos();
-      setModelDropdownOpen(ids.length > 0);
-      setStatus(`Found ${ids.length} model${ids.length === 1 ? "" : "s"}.`);
-      setTimeout(() => setStatus(null), 2000);
-    } catch (e) {
-      console.error("list_ai_models failed", e);
-      setStatus(`Fetch failed: ${e}`);
-    } finally {
-      setFetchingModels(false);
-    }
-  };
+  // Model dropdown options = fetched models, with the current value always
+  // present (so a manually-configured / unlisted model still shows).
+  const modelOptions = (() => {
+    const ids = [...availableModels];
+    const cur = settings.ai.model;
+    if (cur && !ids.includes(cur)) ids.unshift(cur);
+    return ids.map((m) => ({ value: m, label: m }));
+  })();
 
   return (
     <div className="st-root">
@@ -439,6 +425,25 @@ export default function Settings() {
               spec={settings.shortcuts.clipboard}
               onChange={(clipboard) => updateShortcuts({ clipboard })}
             />
+          </div>
+        </section>
+
+        <section className="st-section">
+          <div className="st-section-title">General</div>
+          <div className="st-row">
+            <div className="st-label">
+              Launch at login
+              <div className="st-hint">Open iShot automatically on startup</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autostart}
+              className={autostart ? "st-switch on" : "st-switch"}
+              onClick={toggleAutostart}
+            >
+              <span className="st-switch-knob" />
+            </button>
           </div>
         </section>
 
@@ -477,240 +482,117 @@ export default function Settings() {
           </div>
           <div className="st-row">
             <div className="st-label">Model</div>
-            <div className="st-model-wrap">
-              <div className="st-key-row">
-                <input
-                  ref={modelInputRef}
-                  className="st-input"
-                  type="text"
-                  value={settings.ai.model}
-                  onFocus={() => {
-                    if (availableModels.length > 0) {
-                      computeDropdownPos();
-                      setModelDropdownOpen(true);
-                    }
-                  }}
-                  onChange={(e) => updateAi({ model: e.target.value })}
-                  placeholder="gpt-4o-mini"
-                />
-                <button
-                  className="st-btn"
-                  onClick={onFetchModels}
-                  disabled={fetchingModels || !settings.ai.base_url.trim()}
-                  title="Fetch models from {base_url}/models"
-                  type="button"
-                >
-                  {fetchingModels ? "…" : "Fetch"}
-                </button>
-              </div>
-              {modelDropdownOpen && availableModels.length > 0 && (
-                <>
-                  {/* Click-outside scrim — covers everything else in the panel
-                      so any non-dropdown click closes the menu. */}
-                  <div
-                    className="st-dropdown-scrim"
-                    onClick={() => setModelDropdownOpen(false)}
-                  />
-                  <ul
-                    className="st-dropdown"
-                    role="listbox"
-                    style={
-                      modelDropdownPos
-                        ? {
-                            top: modelDropdownPos.top,
-                            left: modelDropdownPos.left,
-                            width: modelDropdownPos.width,
-                          }
-                        : undefined
-                    }
-                  >
-                    {availableModels.map((m) => (
-                      <li
-                        key={m}
-                        className={
-                          m === settings.ai.model
-                            ? "st-dropdown-item selected"
-                            : "st-dropdown-item"
-                        }
-                        onClick={() => {
-                          updateAi({ model: m });
-                          setModelDropdownOpen(false);
-                        }}
-                        role="option"
-                        aria-selected={m === settings.ai.model}
-                      >
-                        {m}
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-            </div>
+            <Dropdown
+              value={settings.ai.model}
+              onChange={(v) => updateAi({ model: v })}
+              maxHeight={200}
+              options={modelOptions}
+            />
           </div>
           <div className="st-row">
             <div className="st-label">API key</div>
-            <div className="st-key-row">
-              <input
-                className="st-input"
-                type="password"
-                placeholder={hasKey ? "••••••••" : "sk-…"}
-                value={apiKeyInput}
-                onChange={(e) => setApiKeyInput(e.target.value)}
-              />
-              <button
-                className="st-btn"
-                onClick={onSaveKey}
-                disabled={savingKey || !apiKeyInput.trim()}
-                type="button"
-              >
-                Save
-              </button>
-              {hasKey && (
-                <button className="st-btn st-btn-ghost" onClick={onClearKey} type="button">
-                  Clear
-                </button>
-              )}
-            </div>
+            <input
+              className="st-input"
+              type="password"
+              placeholder={hasKey ? "•••••••• (saved)" : "sk-…"}
+              value={apiKeyInput}
+              onChange={(e) => setApiKeyInput(e.target.value)}
+            />
           </div>
         </section>
 
         <section className="st-section">
           <div className="st-section-title">Screenshot Background</div>
 
-          <div className="st-row">
-            <div className="st-label">
-              Enable
-              <div className="st-hint">Composite screenshots onto a backdrop</div>
+          {/* No Enable/Shadow toggles — "None" in the Background dropdown turns
+              the backdrop off. The preview is a small SQUARE on the right (a
+              top-left CORNER crop) spanning the 3 rows' height, so a change
+              shows right beside the control that made it. */}
+          <div className="st-bg-grid">
+            <div className="st-bg-controls">
+              {/* ONE picker with everything: current wallpaper (default),
+                  custom image, none, then gradients + solid colours. */}
+              <div className="st-row">
+                <div className="st-label">Background</div>
+                <Dropdown
+                  value={
+                    !app.enabled
+                      ? "none"
+                      : app.kind === "gradient"
+                        ? `g:${app.value}`
+                        : app.kind === "color"
+                          ? `c:${app.value}`
+                          : app.kind
+                  }
+                  onChange={onBgChange}
+                  maxHeight={200}
+                  options={[
+                    { value: "wallpaper", label: "Current wallpaper" },
+                    { value: "image", label: "Custom image…" },
+                    { value: "none", label: "None" },
+                    ...GRADIENT_PRESETS.map((g) => ({
+                      value: `g:${g.id}`,
+                      label: g.label,
+                      swatch: gradientCss(g.id),
+                    })),
+                    ...COLOR_PRESETS.map((c) => ({
+                      value: `c:${c}`,
+                      label: COLOR_LABELS[c] ?? c,
+                      swatch: c,
+                    })),
+                  ]}
+                />
+              </div>
+
+              <div className="st-row">
+                <div className="st-label">Corner radius</div>
+                <Dropdown
+                  value={nearest(app.radius, RADIUS_OPTIONS)}
+                  onChange={(v) => updateAppearance({ radius: parseInt(v, 10) })}
+                  options={RADIUS_OPTIONS}
+                />
+              </div>
+
+              <div className="st-row">
+                <div className="st-label">Padding</div>
+                <Dropdown
+                  value={nearest(app.padding, PADDING_OPTIONS)}
+                  onChange={(v) => updateAppearance({ padding: parseInt(v, 10) })}
+                  options={PADDING_OPTIONS}
+                />
+              </div>
             </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={app.enabled}
-              className={app.enabled ? "st-switch on" : "st-switch"}
-              onClick={() => updateAppearance({ enabled: !app.enabled })}
+
+            <div
+              className={
+                "st-bg-preview-square" +
+                (app.enabled && (app.kind === "gradient" || app.kind === "color")
+                  ? " grain"
+                  : "")
+              }
+              style={{ background: previewBg }}
             >
-              <span className="st-switch-knob" />
-            </button>
-          </div>
-
-          <div className={app.enabled ? "st-bg-controls" : "st-bg-controls disabled"}>
-            {/* Shadow toggle grouped with Enable (both are switches). */}
-            <div className="st-row">
-              <div className="st-label">Shadow</div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={app.shadow}
-                className={app.shadow ? "st-switch on" : "st-switch"}
-                onClick={() => updateAppearance({ shadow: !app.shadow })}
-              >
-                <span className="st-switch-knob" />
-              </button>
-            </div>
-
-            <div className="st-row">
-              <div className="st-label">Type</div>
-              <Dropdown
-                value={app.kind}
-                onChange={(v) => onKindChange(v as AppearanceKind)}
-                options={[
-                  { value: "gradient", label: "Gradient" },
-                  { value: "color", label: "Solid color" },
-                  { value: "wallpaper", label: "Current wallpaper" },
-                  { value: "image", label: "Custom image…" },
-                ]}
-              />
-            </div>
-
-            {app.kind === "gradient" && (
-              <div className="st-row">
-                <div className="st-label">Style</div>
-                <Dropdown
-                  value={app.value}
-                  onChange={(v) => updateAppearance({ value: v })}
-                  options={GRADIENT_PRESETS.map((g) => ({
-                    value: g.id,
-                    label: g.id.charAt(0).toUpperCase() + g.id.slice(1),
-                    swatch: gradientCss(g.id),
-                  }))}
-                />
-              </div>
-            )}
-
-            {app.kind === "color" && (
-              <div className="st-row">
-                <div className="st-label">Color</div>
-                <Dropdown
-                  value={app.value}
-                  onChange={(v) => updateAppearance({ value: v })}
-                  options={COLOR_PRESETS.map((c) => ({
-                    value: c,
-                    label: COLOR_LABELS[c] ?? c,
-                    swatch: c,
-                  }))}
-                />
-              </div>
-            )}
-
-            {app.kind === "image" && (
-              <div className="st-row">
-                <button type="button" className="st-btn" onClick={pickCustomImage}>
-                  Choose image…
-                </button>
-                {app.value && (
-                  <div className="st-bg-path" title={app.value}>
-                    {app.value.split("/").pop()}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="st-row">
-              <div className="st-label">Corner radius</div>
-              <Dropdown
-                value={nearest(app.radius, RADIUS_OPTIONS)}
-                onChange={(v) => updateAppearance({ radius: parseInt(v, 10) })}
-                options={RADIUS_OPTIONS}
-              />
-            </div>
-
-            <div className="st-row">
-              <div className="st-label">Padding</div>
-              <Dropdown
-                value={nearest(app.padding, PADDING_OPTIONS)}
-                onChange={(v) => updateAppearance({ padding: parseInt(v, 10) })}
-                options={PADDING_OPTIONS}
-              />
-            </div>
-
-            {/* Live preview — updates as the options change. */}
-            <div className="st-row st-bg-preview-row">
-              <div className="st-label">Preview</div>
               <div
-                className={
-                  "st-preview-tile" +
-                  (app.kind === "gradient" || app.kind === "color"
-                    ? " grain"
-                    : "")
-                }
-                style={{ background: previewBg }}
-              >
-                <div
-                  className="st-preview-shot"
-                  style={{
-                    borderRadius: app.radius,
-                    inset: `${Math.round((app.padding / 160) * 26)}px`,
-                    boxShadow: app.shadow ? "0 2px 7px rgba(0,0,0,0.4)" : "none",
-                  }}
-                />
-              </div>
+                className="st-bg-preview-corner"
+                style={{
+                  top: app.enabled ? Math.round(app.padding * 0.32) : 0,
+                  left: app.enabled ? Math.round(app.padding * 0.32) : 0,
+                  borderRadius: app.enabled ? app.radius : 0,
+                  boxShadow:
+                    app.enabled && app.shadow ? "0 6px 18px rgba(0,0,0,0.45)" : "none",
+                }}
+              />
             </div>
           </div>
         </section>
       </div>
 
       <div className="st-footer">
-        {status && <div className="st-status">{status}</div>}
+        {status ? (
+          <div className="st-status">{status}</div>
+        ) : (
+          <div className="st-status">{version ? `iShot ${version}` : ""}</div>
+        )}
         <div className="st-footer-buttons">
           <button className="st-btn st-btn-primary" onClick={hide} type="button">
             Done

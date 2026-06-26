@@ -6,8 +6,15 @@ use serde::{Deserialize, Serialize};
 #[link(name = "Vision", kind = "framework")]
 extern "C" {}
 
+fn default_text() -> String {
+    "text".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextBlock {
+    /// Discriminator: "text" for OCR text, "qr" for decoded barcodes/QR codes.
+    #[serde(default = "default_text")]
+    pub kind: String,
     pub text: String,
     pub x: f64,
     pub y: f64,
@@ -45,8 +52,11 @@ impl OcrService {
 
         let blocks = unsafe { Self::recognize_with_vision(png_data, img_w, img_h)? };
 
+        // QR payloads are surfaced only via `blocks` — keep `full_text` to OCR
+        // text so translate/AI seeding doesn't ingest barcode URLs.
         let full_text = blocks
             .iter()
+            .filter(|b| b.kind != "qr")
             .map(|b| b.text.clone())
             .collect::<Vec<_>>()
             .join("\n");
@@ -96,17 +106,34 @@ impl OcrService {
                 let _: () = msg_send![request, setAutomaticallyDetectsLanguage: YES];
             }
 
+            // QR/barcode detection runs in the SAME Vision pass (one image
+            // decode). A nil request here must never fail OCR — we just skip
+            // barcode collection below.
+            let barcode_request: id = msg_send![class!(VNDetectBarcodesRequest), alloc];
+            let barcode_request: id = msg_send![barcode_request, init];
+
             let options: id = msg_send![class!(NSDictionary), dictionary];
             let handler: id = msg_send![class!(VNImageRequestHandler), alloc];
             let handler: id = msg_send![handler, initWithData: ns_data options: options];
             if handler == nil {
                 let _: () = msg_send![request, release];
+                if barcode_request != nil {
+                    let _: () = msg_send![barcode_request, release];
+                }
                 return Err(AppError::OcrError(
                     "VNImageRequestHandler creation failed".into(),
                 ));
             }
 
-            let requests: id = msg_send![class!(NSArray), arrayWithObject: request];
+            // Build the request array: always the text request, plus the
+            // barcode request when it allocated successfully. (Variadic
+            // `arrayWithObjects:` isn't expressible via msg_send!, so build a
+            // mutable array and addObject: each.)
+            let requests: id = msg_send![class!(NSMutableArray), array];
+            let _: () = msg_send![requests, addObject: request];
+            if barcode_request != nil {
+                let _: () = msg_send![requests, addObject: barcode_request];
+            }
             let mut error: id = nil;
             let ok: BOOL = msg_send![handler, performRequests: requests error: &mut error];
 
@@ -148,6 +175,7 @@ impl OcrService {
                     let confidence: f32 = msg_send![cand, confidence];
                     let bbox: NSRect = msg_send![obs, boundingBox];
                     blocks.push(TextBlock {
+                        kind: "text".to_string(),
                         text,
                         x: bbox.origin.x * img_w,
                         y: (1.0 - bbox.origin.y - bbox.size.height) * img_h,
@@ -156,11 +184,53 @@ impl OcrService {
                         confidence: confidence as f64,
                     });
                 }
+
+                // Collect decoded QR/barcodes from the barcode request. Entirely
+                // defensive: nil request / nil results / nil payloads yield no
+                // blocks and never fail OCR. Payloads flow only via `blocks`
+                // (NOT `full_text`) so translate/AI seeding is unaffected.
+                if barcode_request != nil {
+                    let bc_results: id = msg_send![barcode_request, results];
+                    let bc_count: usize = if bc_results == nil {
+                        0
+                    } else {
+                        msg_send![bc_results, count]
+                    };
+                    for i in 0..bc_count {
+                        let obs: id = msg_send![bc_results, objectAtIndex: i];
+                        if obs == nil {
+                            continue;
+                        }
+                        let payload: id = msg_send![obs, payloadStringValue];
+                        if payload == nil {
+                            continue;
+                        }
+                        let cstr: *const c_char = msg_send![payload, UTF8String];
+                        if cstr.is_null() {
+                            continue;
+                        }
+                        let text = CStr::from_ptr(cstr).to_string_lossy().into_owned();
+                        let bbox: NSRect = msg_send![obs, boundingBox];
+                        blocks.push(TextBlock {
+                            kind: "qr".to_string(),
+                            text,
+                            x: bbox.origin.x * img_w,
+                            y: (1.0 - bbox.origin.y - bbox.size.height) * img_h,
+                            width: bbox.size.width * img_w,
+                            height: bbox.size.height * img_h,
+                            confidence: 1.0,
+                        });
+                    }
+                }
+
                 Ok(blocks)
             };
 
             let _: () = msg_send![handler, release];
             let _: () = msg_send![request, release];
+            if barcode_request != nil {
+                let _: () = msg_send![barcode_request, release];
+            }
             result
         })
     }

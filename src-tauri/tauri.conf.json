@@ -43,7 +43,13 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["/tmp/ishot_*", "/tmp/ishot_*/**"]
+        "scope": [
+          "/tmp/ishot_*",
+          "/tmp/ishot_*/**",
+          "$HOME/**",
+          "/System/Library/Desktop Pictures/**",
+          "/Library/Desktop Pictures/**"
+        ]
       }
     }
   },

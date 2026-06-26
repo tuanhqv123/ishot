@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { GRADIENT_PRESETS, gradientCss } from "./gradients";
 
 // Modifier bitmask mirrors the Rust side: 1=Cmd, 2=Shift, 4=Alt, 8=Ctrl.
 const MOD_META = 1;
@@ -11,11 +12,81 @@ const MOD_CTRL = 8;
 type ShortcutSpec = { modifiers: number; key: string };
 type Shortcuts = { capture: ShortcutSpec; clipboard: ShortcutSpec };
 type AiConfig = { base_url: string; model: string };
+// Screenshot-background appearance. Fixed contract — must match the Rust
+// AppearanceConfig exactly so the get_settings/save_settings round-trip works.
+//   kind  : "gradient" | "color" | "wallpaper" | "image"
+//   value : gradient preset id | hex color | custom image path ("" for wallpaper)
+type AppearanceKind = "gradient" | "color" | "wallpaper" | "image";
+type AppearanceConfig = {
+  enabled: boolean;
+  kind: AppearanceKind;
+  value: string;
+  padding: number;
+  radius: number;
+  shadow: boolean;
+};
 type SettingsT = {
   shortcuts: Shortcuts;
   retention: number;
   ai: AiConfig;
+  appearance: AppearanceConfig;
 };
+
+// Defaults applied in code when an older settings.json lacks `appearance`, so the
+// controls render and the next save persists it.
+const DEFAULT_APPEARANCE: AppearanceConfig = {
+  enabled: false,
+  kind: "gradient",
+  value: "",
+  padding: 48,
+  radius: 12,
+  shadow: true,
+};
+
+// Gradient presets come from the SHARED module (src/gradients.ts) so the picker,
+// the live preview here, and the overlay's renderFinalImage all use identical
+// ids + color stops (preview == exported image).
+
+// Solid-color swatches. Persisted as appearance.value = the hex string.
+const COLOR_PRESETS: string[] = [
+  "#ffffff",
+  "#f2f2f7",
+  "#1c1c1e",
+  "#0a84ff",
+  "#ff375f",
+  "#30d158",
+];
+const COLOR_LABELS: Record<string, string> = {
+  "#ffffff": "White",
+  "#f2f2f7": "Off-white",
+  "#1c1c1e": "Charcoal",
+  "#0a84ff": "Blue",
+  "#ff375f": "Pink",
+  "#30d158": "Green",
+};
+
+// Resolves the CSS `background` for a given appearance, using a cached
+// convertFileSrc URL for wallpaper/custom-image so the live preview shows the
+// real backdrop. Returns undefined for kinds with no resolvable image yet.
+function backgroundCss(
+  appearance: AppearanceConfig,
+  wallpaperSrc: string | null,
+): string | undefined {
+  switch (appearance.kind) {
+    case "gradient":
+      return gradientCss(appearance.value);
+    case "color":
+      return appearance.value || "#1c1c1e";
+    case "wallpaper":
+      return wallpaperSrc
+        ? `center / cover no-repeat url("${wallpaperSrc}")`
+        : "#1c1c1e";
+    case "image":
+      return appearance.value
+        ? `center / cover no-repeat url("${convertFileSrc(appearance.value)}")`
+        : "#1c1c1e";
+  }
+}
 
 function modsToString(mods: number): string[] {
   const out: string[] = [];
@@ -125,17 +196,39 @@ export default function Settings() {
     setModelDropdownPos({ top: r.bottom + 4, left: r.left, width: r.width });
   }, []);
 
+  // Resolved file:// src for the current desktop wallpaper, cached so the live
+  // preview can render it. Fetched lazily when the "Current wallpaper" kind is
+  // chosen (or already active on load).
+  const [wallpaperSrc, setWallpaperSrc] = useState<string | null>(null);
+
+  const loadWallpaper = useCallback(async () => {
+    try {
+      const path = await invoke<string>("get_desktop_wallpaper_path");
+      setWallpaperSrc(path ? convertFileSrc(path) : null);
+    } catch (e) {
+      console.error("get_desktop_wallpaper_path failed", e);
+      setWallpaperSrc(null);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const s = await invoke<SettingsT>("get_settings");
-      setSettings(s);
+      // Older configs predate `appearance` — default it in so the controls
+      // render and the next save persists the field.
+      const appearance: AppearanceConfig = {
+        ...DEFAULT_APPEARANCE,
+        ...(s.appearance ?? {}),
+      };
+      setSettings({ ...s, appearance });
+      if (appearance.kind === "wallpaper") loadWallpaper();
       const present = await invoke<boolean>("has_api_key");
       setHasKey(present);
       setLoaded(true);
     } catch (e) {
       console.error("load settings failed", e);
     }
-  }, []);
+  }, [loadWallpaper]);
 
   useEffect(() => {
     refresh();
@@ -170,6 +263,61 @@ export default function Settings() {
   const updateAi = (patch: Partial<AiConfig>) => {
     setSettings((s) => (s ? { ...s, ai: { ...s.ai, ...patch } } : s));
   };
+  const updateAppearance = (patch: Partial<AppearanceConfig>) => {
+    setSettings((s) =>
+      s ? { ...s, appearance: { ...s.appearance, ...patch } } : s,
+    );
+  };
+
+  // Opens a native image file picker via the dialog plugin's IPC bridge (the
+  // @tauri-apps/plugin-dialog JS package isn't a dependency, so we call the
+  // underlying command directly). Returns a single absolute path or null.
+  const pickCustomImage = async () => {
+    try {
+      const selected = await invoke<string | string[] | null>(
+        "plugin:dialog|open",
+        {
+          options: {
+            multiple: false,
+            directory: false,
+            filters: [
+              {
+                name: "Images",
+                extensions: ["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp", "tiff"],
+              },
+            ],
+          },
+        },
+      );
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      if (path) updateAppearance({ kind: "image", value: path });
+    } catch (e) {
+      console.error("image picker failed", e);
+      setStatus(`Could not open file picker: ${e}`);
+    }
+  };
+
+  const selectWallpaper = () => {
+    updateAppearance({ kind: "wallpaper", value: "" });
+    if (!wallpaperSrc) loadWallpaper();
+  };
+
+  // Background-type dropdown: switch kind, keeping/seeding a sensible value.
+  const onKindChange = (kind: AppearanceKind) => {
+    const v = settings.appearance.value;
+    if (kind === "gradient")
+      updateAppearance({
+        kind,
+        value: GRADIENT_PRESETS.some((g) => g.id === v) ? v : GRADIENT_PRESETS[0].id,
+      });
+    else if (kind === "color")
+      updateAppearance({ kind, value: /^#/.test(v) ? v : COLOR_PRESETS[0] });
+    else if (kind === "wallpaper") selectWallpaper();
+    else updateAppearance({ kind: "image" });
+  };
+
+  const app = settings.appearance;
+  const previewBg = backgroundCss(app, wallpaperSrc);
 
   const onSave = async () => {
     try {
@@ -384,6 +532,154 @@ export default function Settings() {
                   Clear
                 </button>
               )}
+            </div>
+          </div>
+        </section>
+
+        <section className="st-section">
+          <div className="st-section-title">Screenshot Background</div>
+
+          <div className="st-row">
+            <div className="st-label">
+              Enable
+              <div className="st-hint">Composite screenshots onto a backdrop</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={app.enabled}
+              className={app.enabled ? "st-switch on" : "st-switch"}
+              onClick={() => updateAppearance({ enabled: !app.enabled })}
+            >
+              <span className="st-switch-knob" />
+            </button>
+          </div>
+
+          <div className={app.enabled ? "st-bg-controls" : "st-bg-controls disabled"}>
+            {/* Type dropdown — compact, replaces the long swatch grid. */}
+            <div className="st-row">
+              <div className="st-label">Type</div>
+              <select
+                className="st-select"
+                value={app.kind}
+                onChange={(e) => onKindChange(e.target.value as AppearanceKind)}
+              >
+                <option value="gradient">Gradient</option>
+                <option value="color">Solid color</option>
+                <option value="wallpaper">Current wallpaper</option>
+                <option value="image">Custom image…</option>
+              </select>
+            </div>
+
+            {app.kind === "gradient" && (
+              <div className="st-row">
+                <div className="st-label">Style</div>
+                <select
+                  className="st-select"
+                  value={app.value}
+                  onChange={(e) => updateAppearance({ value: e.target.value })}
+                >
+                  {GRADIENT_PRESETS.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.id.charAt(0).toUpperCase() + g.id.slice(1)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {app.kind === "color" && (
+              <div className="st-row">
+                <div className="st-label">Color</div>
+                <select
+                  className="st-select"
+                  value={app.value}
+                  onChange={(e) => updateAppearance({ value: e.target.value })}
+                >
+                  {COLOR_PRESETS.map((c) => (
+                    <option key={c} value={c}>
+                      {COLOR_LABELS[c] ?? c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {app.kind === "image" && (
+              <div className="st-row">
+                <button type="button" className="st-btn" onClick={pickCustomImage}>
+                  Choose image…
+                </button>
+                {app.value && (
+                  <div className="st-bg-path" title={app.value}>
+                    {app.value.split("/").pop()}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Single live preview + both sliders, side by side (compact). */}
+            <div className="st-row st-bg-preview-row">
+              <div
+                className={
+                  "st-preview-tile" +
+                  (app.kind === "gradient" || app.kind === "color"
+                    ? " grain"
+                    : "")
+                }
+                style={{ background: previewBg }}
+              >
+                <div
+                  className="st-preview-shot"
+                  style={{
+                    borderRadius: app.radius,
+                    inset: `${Math.round((app.padding / 160) * 26)}px`,
+                    boxShadow: app.shadow ? "0 2px 7px rgba(0,0,0,0.4)" : "none",
+                  }}
+                />
+              </div>
+              <div className="st-bg-sliders">
+                <div className="st-slider-label">
+                  <span>Radius</span>
+                  <span className="st-hint">{app.radius}px</span>
+                </div>
+                <input
+                  className="st-slider"
+                  type="range"
+                  min={0}
+                  max={48}
+                  value={app.radius}
+                  onChange={(e) =>
+                    updateAppearance({ radius: parseInt(e.target.value, 10) })
+                  }
+                />
+                <div className="st-slider-label">
+                  <span>Padding</span>
+                  <span className="st-hint">{app.padding}px</span>
+                </div>
+                <input
+                  className="st-slider"
+                  type="range"
+                  min={0}
+                  max={160}
+                  value={app.padding}
+                  onChange={(e) =>
+                    updateAppearance({ padding: parseInt(e.target.value, 10) })
+                  }
+                />
+                <div className="st-slider-label">
+                  <span>Shadow</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={app.shadow}
+                    className={app.shadow ? "st-switch on" : "st-switch"}
+                    onClick={() => updateAppearance({ shadow: !app.shadow })}
+                  >
+                    <span className="st-switch-knob" />
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </section>

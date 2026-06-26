@@ -32,11 +32,41 @@ pub struct AiConfig {
     pub model: String,
 }
 
+/// Screenshot background mode: composite the finished capture onto a
+/// background (gradient / solid color / desktop wallpaper / custom image) with
+/// adjustable corner radius + padding. Disabled by default.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AppearanceConfig {
+    pub enabled: bool,
+    /// One of: "gradient" | "color" | "wallpaper" | "image".
+    pub kind: String,
+    /// Gradient id | hex color | custom image path ("" for wallpaper).
+    pub value: String,
+    pub padding: u32,
+    pub radius: u32,
+    pub shadow: bool,
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kind: "gradient".to_string(),
+            value: "".to_string(),
+            padding: 48,
+            radius: 12,
+            shadow: true,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settings {
     pub shortcuts: Shortcuts,
     pub retention: usize,
     pub ai: AiConfig,
+    #[serde(default)]
+    pub appearance: AppearanceConfig,
 }
 
 impl Default for Settings {
@@ -57,6 +87,7 @@ impl Default for Settings {
                 base_url: "https://api.openai.com/v1".to_string(),
                 model: "gpt-4o-mini".to_string(),
             },
+            appearance: Default::default(),
         }
     }
 }

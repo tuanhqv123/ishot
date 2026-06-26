@@ -8,5 +8,9 @@
     <string>iShot needs screen recording permission to capture screenshots.</string>
     <key>NSInputMonitoringUsageDescription</key>
     <string>iShot reads your scroll movements so scrolling screenshots stitch together accurately. It only listens while you capture — it never types or controls anything.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>iShot records microphone audio when you include it in a screen recording.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>iShot shows an optional camera bubble in your screen recordings.</string>
 </dict>
 </plist>

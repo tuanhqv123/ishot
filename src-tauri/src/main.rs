@@ -674,6 +674,9 @@ fn main() {
             commands::settings::open_settings,
             commands::ai_chat::ai_chat_stream,
             commands::ai_chat::list_ai_models,
+            commands::appearance::get_desktop_wallpaper_path,
+            commands::appearance::read_image_as_data_url,
+            commands::hud::show_hud,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

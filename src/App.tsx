@@ -28,6 +28,30 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rough from "roughjs";
 import { getStroke } from "perfect-freehand";
+import { gradientById } from "./gradients";
+
+// Cached procedural grain tile, overlaid on gradient/solid backgrounds so the
+// exported image has the same subtle noise texture as the Settings preview.
+let _noiseTile: HTMLCanvasElement | null = null;
+function noiseTile(): HTMLCanvasElement {
+	if (_noiseTile) return _noiseTile;
+	const size = 180;
+	const c = document.createElement("canvas");
+	c.width = size;
+	c.height = size;
+	const x = c.getContext("2d")!;
+	const id = x.createImageData(size, size);
+	for (let i = 0; i < id.data.length; i += 4) {
+		const v = (Math.random() * 255) | 0;
+		id.data[i] = v;
+		id.data[i + 1] = v;
+		id.data[i + 2] = v;
+		id.data[i + 3] = 255;
+	}
+	x.putImageData(id, 0, 0);
+	_noiseTile = c;
+	return c;
+}
 
 interface AiChatMsg {
 	role: "system" | "user" | "assistant";
@@ -56,6 +80,16 @@ interface TextBlock {
 	width: number;
 	height: number;
 	confidence: number;
+	kind?: "text" | "qr";
+}
+
+interface Appearance {
+	enabled: boolean;
+	kind: "gradient" | "color" | "wallpaper" | "image";
+	value: string;
+	padding: number;
+	radius: number;
+	shadow: boolean;
 }
 interface MonitorInfo {
 	x: number;
@@ -312,16 +346,103 @@ function App() {
 	// re-activates this one so clicking it always drops you into a usable tool.
 	const [lastShape, setLastShape] = useState<Tool>("rect");
 	const [editingTextId, setEditingTextId] = useState<number | null>(null);
+	// Screenshot background-compositing settings (F3). null until first load;
+	// gated on `enabled` so disabled == byte-for-byte current behavior.
+	const [appearance, setAppearance] = useState<Appearance | null>(null);
+	// Preloaded+cached background Image for kind "wallpaper"/"image" so the
+	// multi-MB decode never happens inside handleDone/handleSave.
+	const bgImageRef = useRef<HTMLImageElement | null>(null);
 
-	// While editing a textbox, the B/U indicators track the CARET: as it moves
-	// through bold/underlined runs the buttons light up to show what typing
-	// here would produce — editor behavior, not per-box state. Font size stays
-	// per-box, synced on selection.
+	// Load appearance settings on mount and whenever Settings broadcasts a change.
+	useEffect(() => {
+		let unlisten: (() => void) | undefined;
+		const load = () => {
+			invoke<{ appearance?: Appearance }>("get_settings")
+				.then((s) => setAppearance(s.appearance ?? null))
+				.catch(() => {});
+		};
+		load();
+		listen("settings-changed", load)
+			.then((u) => {
+				unlisten = u;
+			})
+			.catch(() => {});
+		return () => {
+			if (unlisten) unlisten();
+		};
+	}, []);
+
+	// Preload + cache the background image when appearance points at a file
+	// (current wallpaper or a custom image). Solid/gradient need no image.
+	useEffect(() => {
+		if (!appearance?.enabled) {
+			bgImageRef.current = null;
+			return;
+		}
+		if (appearance.kind !== "wallpaper" && appearance.kind !== "image") {
+			bgImageRef.current = null;
+			return;
+		}
+		let cancelled = false;
+		const resolvePath = async (): Promise<string> => {
+			if (appearance.kind === "wallpaper")
+				return invoke<string>("get_desktop_wallpaper_path");
+			return appearance.value;
+		};
+		resolvePath()
+			.then(async (path) => {
+				if (cancelled || !path) return;
+				// Load as a same-origin data: URL (NOT convertFileSrc): an asset-
+				// protocol image taints the canvas, making renderFinalImage's
+				// toDataURL throw and the clipboard copy fail. Data URLs never
+				// taint, and work for files anywhere on disk.
+				const dataUrl = await invoke<string>("read_image_as_data_url", {
+					path,
+				});
+				if (cancelled) return;
+				const img = new Image();
+				img.onload = () => {
+					if (!cancelled) bgImageRef.current = img;
+				};
+				img.onerror = () => {
+					if (!cancelled) bgImageRef.current = null;
+				};
+				img.src = dataUrl;
+			})
+			.catch(() => {
+				bgImageRef.current = null;
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [appearance]);
+
+	// While editing a textbox, the toolbar tracks the CARET: as it moves through
+	// runs, Bold/Underline light up and the color swatch + font size reflect what
+	// typing here would produce — editor behavior (like a word processor), not
+	// per-box state. Color and size are per-run too, so they sync the same way.
 	useEffect(() => {
 		if (editingTextId === null) return;
+		const rgbToHex = (rgb: string): string | null => {
+			const m = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+			if (!m) return null;
+			const h = (n: string) => Number(n).toString(16).padStart(2, "0");
+			return `#${h(m[1])}${h(m[2])}${h(m[3])}`;
+		};
 		const sync = () => {
 			setFontBold(document.queryCommandState("bold"));
 			setFontUnderline(document.queryCommandState("underline"));
+			const col = rgbToHex(document.queryCommandValue("foreColor") || "");
+			if (col) setStrokeColor(col);
+			const node = window.getSelection()?.anchorNode;
+			const el =
+				node && node.nodeType === 3
+					? node.parentElement
+					: (node as HTMLElement | null);
+			if (el) {
+				const px = parseInt(window.getComputedStyle(el).fontSize, 10);
+				if (px && !Number.isNaN(px)) setFontSize(px);
+			}
 		};
 		sync();
 		document.addEventListener("selectionchange", sync);
@@ -444,6 +565,66 @@ function App() {
 					prev.map((a) => (a.id === target ? { ...a, html, text } : a)),
 				);
 			syncIndicators();
+		},
+		[editingTextId],
+	);
+
+	// Apply a per-RUN inline style (color / font-size) at the caret of the
+	// textbox being edited, mirroring toggleInlineStyle. Color/size have no
+	// "toggle off" — always wrap-with-value. Px font sizes can't go through
+	// execCommand("fontSize") (1–7 only), so span-wrap is the only reliable path.
+	const applyTextStyle = useCallback(
+		(css: string) => {
+			const root = document.activeElement as HTMLElement | null;
+			if (!root || !root.isContentEditable) return;
+			const sel = window.getSelection();
+			if (!sel || sel.rangeCount === 0) return;
+
+			if (!sel.isCollapsed) {
+				// Real selection → wrap the extracted range in a styled span.
+				const range = sel.getRangeAt(0);
+				const frag = range.extractContents();
+				const span = document.createElement("span");
+				span.setAttribute("style", css);
+				span.appendChild(frag);
+				range.insertNode(span);
+				// Move caret to end of the new span.
+				const r = document.createRange();
+				r.selectNodeContents(span);
+				r.collapse(false);
+				sel.removeAllRanges();
+				sel.addRange(r);
+			} else {
+				// Collapsed caret → insert a zero-width marker span so typing
+				// continues in the new style, then park the caret inside it.
+				document.execCommand(
+					"insertHTML",
+					false,
+					`<span data-ts="1" style="${css}">​</span>`,
+				);
+				const marker = root.querySelector(
+					'[data-ts="1"]',
+				) as HTMLElement | null;
+				if (!marker) return;
+				const tn = marker.firstChild;
+				if (tn) {
+					const r = document.createRange();
+					r.setStart(tn, 1);
+					r.collapse(true);
+					sel.removeAllRanges();
+					sel.addRange(r);
+				}
+				marker.removeAttribute("data-ts");
+			}
+
+			// The DOM changed without an input event — persist it ourselves.
+			const html = root.innerHTML;
+			const text = root.innerText.replace(/​/g, "");
+			const target = editingTextId;
+			if (target !== null)
+				setAnnotations((prev) =>
+					prev.map((a) => (a.id === target ? { ...a, html, text } : a)),
+				);
 		},
 		[editingTextId],
 	);
@@ -764,12 +945,111 @@ function App() {
 			}
 		}
 
-		const base64 = canvas.toDataURL("image/png").split(",")[1];
+		// Screenshot background compositing (F3). Gated on appearance.enabled —
+		// when off, `exportCanvas` stays the original crop (byte-for-byte current
+		// behavior). When on, draw the crop rounded + padded over a background.
+		let exportCanvas: HTMLCanvasElement = canvas;
+		if (appearance?.enabled) {
+			const pad = Math.round(appearance.padding * scale);
+			const rad = Math.round(appearance.radius * scale);
+			const out = document.createElement("canvas");
+			out.width = sw + 2 * pad;
+			out.height = sh + 2 * pad;
+			const octx = out.getContext("2d")!;
+
+			// 1. Paint the background across the whole output canvas.
+			if (appearance.kind === "color") {
+				octx.fillStyle = appearance.value || "#1c1c1e";
+				octx.fillRect(0, 0, out.width, out.height);
+			} else if (appearance.kind === "gradient") {
+				// Shared preset table (src/gradients.ts) — same ids/stops the
+				// Settings picker shows, so preview matches the exported image.
+				const p = gradientById(appearance.value);
+				const grad = octx.createLinearGradient(0, 0, out.width, out.height);
+				grad.addColorStop(0, p.from);
+				grad.addColorStop(1, p.to);
+				octx.fillStyle = grad;
+				octx.fillRect(0, 0, out.width, out.height);
+			} else {
+				// "wallpaper" / "image" → use the cached preloaded Image, cover-fit.
+				const bg = bgImageRef.current;
+				if (bg && bg.complete && bg.naturalWidth > 0) {
+					const ar = bg.naturalWidth / bg.naturalHeight;
+					const outAr = out.width / out.height;
+					let dw = out.width;
+					let dh = out.height;
+					if (ar > outAr) {
+						// image wider → match height, crop sides
+						dh = out.height;
+						dw = dh * ar;
+					} else {
+						dw = out.width;
+						dh = dw / ar;
+					}
+					const dx = (out.width - dw) / 2;
+					const dy = (out.height - dh) / 2;
+					octx.drawImage(bg, dx, dy, dw, dh);
+				} else {
+					octx.fillStyle = "#1c1c1e";
+					octx.fillRect(0, 0, out.width, out.height);
+				}
+			}
+
+			// 1b. Grain overlay on gradient/solid backgrounds (matches the
+			// Settings preview) — subtle noise so flat gradients don't look cheap.
+			if (appearance.kind === "gradient" || appearance.kind === "color") {
+				const pat = octx.createPattern(noiseTile(), "repeat");
+				if (pat) {
+					octx.save();
+					octx.globalAlpha = 0.06;
+					octx.fillStyle = pat;
+					octx.fillRect(0, 0, out.width, out.height);
+					octx.restore();
+				}
+			}
+
+			// 2. Optional soft shadow: paint a rounded-rect "card" behind the
+			// screenshot so the shadow is actually visible (a shadow on the
+			// clipped drawImage would be hidden by its own clip).
+			if (appearance.shadow) {
+				octx.save();
+				octx.shadowColor = "rgba(0,0,0,0.35)";
+				octx.shadowBlur = Math.round(24 * scale);
+				octx.shadowOffsetY = Math.round(8 * scale);
+				octx.fillStyle = "#000";
+				octx.beginPath();
+				octx.roundRect(pad, pad, sw, sh, rad);
+				octx.fill();
+				octx.restore();
+			}
+
+			// 3. Clip a rounded rect at the padded inset and draw the crop.
+			octx.save();
+			octx.beginPath();
+			octx.roundRect(pad, pad, sw, sh, rad);
+			octx.clip();
+			octx.drawImage(canvas, pad, pad);
+			octx.restore();
+
+			exportCanvas = out;
+		}
+
+		// If the background canvas ever ends up tainted (e.g. a future image
+		// source without CORS), toDataURL throws — fall back to the plain crop
+		// so the clipboard copy still succeeds instead of silently failing.
+		let dataUrl: string;
+		try {
+			dataUrl = exportCanvas.toDataURL("image/png");
+		} catch (err) {
+			console.error("background export failed, using plain crop:", err);
+			dataUrl = canvas.toDataURL("image/png");
+		}
+		const base64 = dataUrl.split(",")[1];
 		const binary = atob(base64);
 		const bytes = new Uint8Array(binary.length);
 		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 		return bytes;
-	}, [displayCaptures, selection, annotations, findDisplay]);
+	}, [displayCaptures, selection, annotations, findDisplay, appearance]);
 
 	const handleDone = useCallback(async () => {
 		const bytes = await renderFinalImage();
@@ -1611,6 +1891,19 @@ function App() {
 				await invoke("copy_text_to_clipboard", { text: selectedText });
 				cancelCapture();
 			} else if (
+				(e.metaKey || e.ctrlKey) &&
+				e.key === "c" &&
+				stage === "editing" &&
+				selection &&
+				tool !== "text"
+			) {
+				// Annotating (region drawn, not in OCR/text mode): Cmd+C finalizes
+				// and copies the annotated image, same as clicking Done. The
+				// `tool !== "text"` guard keeps OCR mode's "drag to select text,
+				// then ⌘C" behavior intact (don't finalize when nothing is selected).
+				e.preventDefault();
+				await handleDone();
+			} else if (
 				(e.key === "Backspace" || e.key === "Delete") &&
 				selectedAnnotation !== null
 			) {
@@ -1642,6 +1935,10 @@ function App() {
 		showTranslate,
 		closeAiPanel,
 		closeTranslatePanel,
+		stage,
+		selection,
+		handleDone,
+		tool,
 	]);
 
 	useEffect(() => {
@@ -2425,7 +2722,7 @@ function App() {
 										width: w,
 										height: h,
 										border: "2px solid #ffffff",
-										boxShadow: "0 0 0 1px rgba(0,0,0,0.45), 0 4px 16px rgba(0,0,0,0.35)",
+										boxShadow: "0 0 0 1px rgba(0,0,0,0.45)",
 										boxSizing: "border-box",
 										pointerEvents: "none",
 									}}
@@ -2605,21 +2902,15 @@ function App() {
 									height: ann.h,
 									zIndex: 11,
 									cursor: editingTextId === ann.id ? "text" : "move",
-									borderRadius: 4,
 									// Committed text reads as part of the image — the frame
 									// only appears while the box is selected/being edited.
-									// Hairline system-blue, not a heavy 2px stroke.
-									// (transparent, not none, so nothing shifts by 1px.)
+									// White hairline, no rounding, no glow.
 									border:
 										ann.id === selectedAnnotation ||
 										editingTextId === ann.id
-											? "1px solid rgba(0, 122, 255, 0.8)"
+											? "1px solid rgba(255, 255, 255, 0.9)"
 											: "1px solid transparent",
-									boxShadow:
-										ann.id === selectedAnnotation ||
-										editingTextId === ann.id
-											? "0 0 0 3px rgba(0, 122, 255, 0.12)"
-											: "none",
+									boxShadow: "none",
 								}}
 							>
 								{ann.id === selectedAnnotation && (
@@ -2771,26 +3062,34 @@ function App() {
 							onMouseMove={handleTextMouseMove}
 							onMouseUp={handleTextMouseUp}
 						>
-							{textBlocks.map((block, idx) => (
-								<div
-									key={idx}
-									style={{
-										position: "absolute",
-										left: block.x,
-										top: block.y,
-										width: block.width,
-										height: block.height,
-										background: selectedBlockIndices.has(idx)
-											? "rgba(0, 122, 255, 0.4)"
-											: "rgba(255, 255, 0, 0.15)",
-										border: selectedBlockIndices.has(idx)
-											? "1px solid rgba(0, 122, 255, 0.8)"
-											: "1px dashed rgba(0, 122, 255, 0.3)",
-										borderRadius: 2,
-										pointerEvents: "none",
-									}}
-								/>
-							))}
+							{textBlocks.map((block, idx) => {
+								const isQr = block.kind === "qr";
+								const sel = selectedBlockIndices.has(idx);
+								return (
+									<div
+										key={idx}
+										style={{
+											position: "absolute",
+											left: block.x,
+											top: block.y,
+											width: block.width,
+											height: block.height,
+											background: sel
+												? "rgba(0, 122, 255, 0.4)"
+												: isQr
+													? "rgba(48, 209, 88, 0.18)"
+													: "rgba(255, 255, 0, 0.15)",
+											border: sel
+												? "1px solid rgba(0, 122, 255, 0.8)"
+												: isQr
+													? "1.5px solid rgba(48, 209, 88, 0.95)"
+													: "1px dashed rgba(0, 122, 255, 0.3)",
+											borderRadius: isQr ? 0 : 2,
+											pointerEvents: "none",
+										}}
+									/>
+								);
+							})}
 							{isSelectingText &&
 								textSelectionRect.current &&
 								textSelectionRect.current.width > 0 && (
@@ -2810,7 +3109,119 @@ function App() {
 						</div>
 					)}
 
-					{/* Annotation canvas */}
+					{/* Decoded QR / barcode results — show the CONTENT inside the code
+						    (e.g. a link), with one-click Copy / Open, instead of
+						    making the user drag-select the pattern. */}
+						{tool === "text" &&
+							(() => {
+								const qrs = textBlocks.filter((b) => b.kind === "qr");
+								if (qrs.length === 0) return null;
+								const belowY = selection.y + selection.height + 8;
+								// Prefer ABOVE the selection so the panel never hides behind
+								// the bottom annotation toolbar; fall back to below if no room.
+								const placeAbove = selection.y > 90;
+								return (
+									<div
+										style={{
+											position: "absolute",
+											left: selection.x,
+											top: placeAbove ? undefined : belowY,
+											bottom: placeAbove
+												? window.innerHeight - selection.y + 8
+												: undefined,
+											maxWidth: Math.max(selection.width, 320),
+											minWidth: 240,
+											background: "rgba(0,0,0,0.88)",
+											borderRadius: 8,
+											padding: 8,
+											zIndex: 99,
+											display: "flex",
+											flexDirection: "column",
+											gap: 6,
+										}}
+									>
+										{qrs.map((b, i) => {
+											const trimmed = b.text.trim();
+											const isUrl = /^(https?:\/\/|www\.)/i.test(trimmed);
+											const url = trimmed.startsWith("www.")
+												? `https://${trimmed}`
+												: trimmed;
+											return (
+												<div
+													key={i}
+													style={{
+														display: "flex",
+														alignItems: "center",
+														gap: 8,
+													}}
+												>
+													<span
+														style={{
+															color: "#fff",
+															fontSize: 12,
+															flex: 1,
+															overflow: "hidden",
+															textOverflow: "ellipsis",
+															whiteSpace: "nowrap",
+														}}
+														title={b.text}
+													>
+														{b.text}
+													</span>
+													<button
+														type="button"
+														onClick={async () => {
+															await invoke("copy_text_to_clipboard", {
+																text: b.text,
+															});
+															invoke("show_hud", {
+																text: "QR content copied",
+															}).catch(() => {});
+														}}
+														style={{
+															background: "rgba(255,255,255,0.15)",
+															color: "#fff",
+															border: "none",
+															borderRadius: 5,
+															padding: "3px 8px",
+															fontSize: 11,
+															cursor: "pointer",
+															flexShrink: 0,
+														}}
+													>
+														Copy
+													</button>
+													{isUrl && (
+														<button
+															type="button"
+															onClick={async () => {
+																await invoke("plugin:shell|open", {
+																	path: url,
+																});
+																cancelCapture();
+															}}
+															style={{
+																background: "#0a84ff",
+																color: "#fff",
+																border: "none",
+																borderRadius: 5,
+																padding: "3px 8px",
+																fontSize: 11,
+																cursor: "pointer",
+																flexShrink: 0,
+															}}
+														>
+															Open
+														</button>
+													)}
+												</div>
+											);
+										})}
+									</div>
+								);
+							})()}
+
+						{/* Annotation canvas */}
 					<canvas
 						ref={canvasRef}
 						style={{
@@ -3114,15 +3525,19 @@ function App() {
 														onChange={(v) => {
 															setFontSize(v);
 															localStorage.setItem("ishot-fontsize", String(v));
-															const target = editingTextId ?? selectedAnnotation;
-															if (target !== null)
+															if (editingTextId !== null) {
+																// Per-run size at the caret, like bold/underline.
+																applyTextStyle(`font-size:${v}px`);
+															} else if (selectedAnnotation !== null) {
+																// Selected (not editing) → whole-box size.
 																setAnnotations((prev) =>
 																	prev.map((a) =>
-																		a.id === target && a.type === "textbox"
+																		a.id === selectedAnnotation && a.type === "textbox"
 																			? { ...a, fontSize: v }
 																			: a,
 																	),
 																);
+															}
 														}}
 													/>
 													<button
@@ -3230,6 +3645,9 @@ function App() {
 													onChange={(color) => {
 														setStrokeColor(color);
 														localStorage.setItem("ishot-color", color);
+														// Per-run color at the caret when editing a textbox.
+														if (editingTextId !== null)
+															applyTextStyle(`color:${color}`);
 													}}
 												/>
 											)}
@@ -3875,6 +4293,7 @@ function DropPicker({
 	return (
 		<div ref={ref} style={{ position: "relative" }}>
 			<button
+				onMouseDown={(e) => e.preventDefault()}
 				onClick={() => setOpen(!open)}
 				style={{
 					height: 28,
@@ -3917,6 +4336,7 @@ function DropPicker({
 					{options.map((v) => (
 						<button
 							key={v}
+							onMouseDown={(e) => e.preventDefault()}
 							onClick={() => {
 								onChange(v);
 								setOpen(false);
@@ -4170,6 +4590,7 @@ function ColorPicker({
 	return (
 		<div ref={ref} style={{ position: "relative" }}>
 			<button
+				onMouseDown={(e) => e.preventDefault()}
 				onClick={() => setOpen(!open)}
 				title="Color"
 				style={{
@@ -4209,6 +4630,7 @@ function ColorPicker({
 					{options.map((color) => (
 						<button
 							key={color}
+							onMouseDown={(e) => e.preventDefault()}
 							onClick={() => {
 								onChange(color);
 								setOpen(false);

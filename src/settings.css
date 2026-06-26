@@ -250,3 +250,179 @@ html, body, #root {
   inset: 0;
   z-index: 9;
 }
+
+/* ── Screenshot Background section ────────────────────────────────────── */
+
+/* iOS-style toggle switch (enable / shadow). */
+.st-switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.16);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.st-switch.on { background: rgba(48, 209, 88, 0.9); }
+.st-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: transform 0.15s ease;
+}
+.st-switch.on .st-switch-knob { transform: translateX(16px); }
+
+/* Wrapper that dims + disables the controls when the section is off. */
+.st-bg-controls.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.st-row-stack {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.st-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+.st-swatch {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  cursor: pointer;
+  background-size: cover;
+  background-position: center;
+}
+.st-swatch:hover { border-color: rgba(255, 255, 255, 0.4); }
+.st-swatch.selected {
+  border-color: rgba(10, 132, 255, 1);
+  box-shadow: 0 0 0 2px rgba(10, 132, 255, 0.5);
+}
+
+.st-bg-options {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+}
+.st-btn-on {
+  background: rgba(10, 132, 255, 0.85);
+  color: #fff;
+}
+.st-btn-on:hover { background: rgba(10, 132, 255, 1); }
+
+.st-bg-path {
+  flex: 1;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+
+/* Slider + live preview tile side by side. */
+.st-slider-preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+.st-slider {
+  flex: 1;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 2px;
+  outline: none;
+}
+.st-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+
+/* Small fixed-size live preview: a sample "screenshot" rectangle padded/rounded
+   over the chosen background. */
+.st-preview-tile {
+  position: relative;
+  flex-shrink: 0;
+  width: 88px;
+  height: 58px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background-size: cover;
+  background-position: center;
+}
+.st-preview-shot {
+  position: absolute;
+  inset: 10px;
+  background: linear-gradient(135deg, #5e8bff 0%, #b06bff 100%);
+  z-index: 1;
+}
+/* Grain/noise overlay on gradient & solid backgrounds (premium look). */
+.st-preview-tile.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.5;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
+/* Compact background-type dropdown. */
+.st-select {
+  flex: 1;
+  max-width: 220px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+}
+.st-select:hover { border-color: rgba(255, 255, 255, 0.4); }
+
+/* Live preview tile + sliders side by side. */
+.st-bg-preview-row {
+  align-items: flex-start;
+  gap: 14px;
+}
+.st-bg-sliders {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.st-slider-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.st-slider-label .st-hint { margin: 0; }

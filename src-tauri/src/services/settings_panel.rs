@@ -26,24 +26,45 @@ pub const PANEL_LABEL: &str = "settings";
 const PANEL_WIDTH: f64 = 520.0;
 const PANEL_HEIGHT: f64 = 620.0;
 
+/// Centre of the monitor the cursor is on (so Settings opens where the user is
+/// looking, not always on the primary display). Accounts for the monitor's
+/// origin offset — essential on multi-monitor setups, where the old code
+/// assumed the primary monitor sat at (0,0) and drifted off-screen otherwise.
+fn centered_position(app: &AppHandle) -> (f64, f64) {
+    let monitor = app
+        .cursor_position()
+        .ok()
+        .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    match monitor {
+        Some(m) => {
+            let scale = m.scale_factor();
+            let pos = m.position();
+            let size = m.size();
+            let mx = pos.x as f64 / scale;
+            let my = pos.y as f64 / scale;
+            let mw = size.width as f64 / scale;
+            let mh = size.height as f64 / scale;
+            (mx + (mw - PANEL_WIDTH) / 2.0, my + (mh - PANEL_HEIGHT) / 2.0)
+        }
+        None => (200.0, 200.0),
+    }
+}
+
+/// Re-centre the existing panel on the active monitor before showing it.
+fn recenter(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(PANEL_LABEL) {
+        let (x, y) = centered_position(app);
+        let _ = win.set_position(Position::Logical(LogicalPosition { x, y }));
+    }
+}
+
 pub fn build(app: &AppHandle) {
     if app.get_webview_window(PANEL_LABEL).is_some() {
         return;
     }
 
-    let (x, y) = match app.primary_monitor().ok().flatten() {
-        Some(m) => {
-            let scale = m.scale_factor();
-            let size = m.size();
-            let logical_w = size.width as f64 / scale;
-            let logical_h = size.height as f64 / scale;
-            (
-                (logical_w - PANEL_WIDTH) / 2.0,
-                (logical_h - PANEL_HEIGHT) / 2.5,
-            )
-        }
-        None => (200.0, 200.0),
-    };
+    let (x, y) = centered_position(app);
 
     let result = PanelBuilder::<_, SettingsPanel>::new(app, PANEL_LABEL)
         .url(WebviewUrl::App("settings.html".into()))
@@ -111,6 +132,7 @@ pub fn show(app: &AppHandle) {
             }
         }
     };
+    recenter(app);
     panel.show_and_make_key();
 }
 
@@ -132,6 +154,7 @@ pub fn toggle(app: &AppHandle) {
     if panel.is_visible() {
         panel.hide();
     } else {
+        recenter(app);
         panel.show_and_make_key();
     }
 }

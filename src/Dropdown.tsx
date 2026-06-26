@@ -71,9 +71,24 @@ export default function Dropdown({
 				selBg: "rgba(10,132,255,0.9)",
 			};
 	const [open, setOpen] = useState(false);
+	const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(
+		null,
+	);
 	const ref = useRef<HTMLDivElement>(null);
+	const triggerRef = useRef<HTMLButtonElement>(null);
 
 	const setOpenNotify = (v: boolean) => {
+		// Position the menu with FIXED coords from the trigger so it isn't clipped
+		// by the Settings panel's scroll/overflow (which hid the lower options).
+		if (v && triggerRef.current) {
+			const r = triggerRef.current.getBoundingClientRect();
+			const estH = Math.min(260, options.length * 32 + 8);
+			setPos({
+				top: openUp ? r.top - estH - 4 : r.bottom + 4,
+				left: r.left,
+				width: r.width,
+			});
+		}
 		setOpen(v);
 		onOpenChange?.(v);
 	};
@@ -96,6 +111,7 @@ export default function Dropdown({
 			style={{ position: "relative", flex: 1, minWidth: minWidth ?? 0 }}
 		>
 			<button
+				ref={triggerRef}
 				type="button"
 				onClick={() => setOpenNotify(!open)}
 				style={{
@@ -137,15 +153,14 @@ export default function Dropdown({
 				</span>
 				<ChevronDown size={15} style={{ opacity: 0.55, flexShrink: 0 }} />
 			</button>
-			{open && (
+			{open && pos && (
 				<ul
 					role="listbox"
 					style={{
-						position: "absolute",
-						top: openUp ? undefined : "calc(100% + 4px)",
-						bottom: openUp ? "calc(100% + 4px)" : undefined,
-						left: 0,
-						right: 0,
+						position: "fixed",
+						top: pos.top,
+						left: pos.left,
+						width: pos.width,
 						maxHeight: 260,
 						overflowY: "auto",
 						margin: 0,
@@ -154,8 +169,6 @@ export default function Dropdown({
 						background: t.menuBg,
 						borderRadius: 8,
 						boxShadow: t.menuShadow,
-						backdropFilter: "blur(20px)",
-						WebkitBackdropFilter: "blur(20px)",
 						zIndex: 1000,
 					}}
 				>

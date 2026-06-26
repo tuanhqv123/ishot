@@ -475,7 +475,6 @@ fn main() {
             //   Quit iShot
             let capture_i = MenuItem::with_id(app, "capture", "Capture", true, None::<&str>)?;
             let record_i = MenuItem::with_id(app, "record", "Record Screen", true, None::<&str>)?;
-            let stop_record_i = MenuItem::with_id(app, "stop_record", "■ Stop Recording", true, None::<&str>)?;
             let clipboard_i = MenuItem::with_id(app, "clipboard_history", "Clipboard History", true, None::<&str>)?;
             let separator1 = PredefinedMenuItem::separator(app)?;
             let settings_i = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
@@ -489,7 +488,6 @@ fn main() {
                 &[
                     &capture_i,
                     &record_i,
-                    &stop_record_i,
                     &clipboard_i,
                     &separator1,
                     &settings_i,
@@ -528,11 +526,6 @@ fn main() {
                             // so just open the capture overlay; the user picks the
                             // Record (Video) tool there.
                             trigger_screenshot(app);
-                        }
-                        "stop_record" => {
-                            // No on-screen control bar (it would be recorded), so
-                            // stopping happens here.
-                            commands::recorder::do_stop(app);
                         }
                         "launch_at_login" => {
                             let autostart = app.autolaunch();
@@ -855,65 +848,87 @@ fn release_overlay_cursor(app: tauri::AppHandle) {
     let _ = app;
 }
 
-/// A red dot menu-bar status item shown WHILE recording — click → Pause/Resume
-/// or Stop. Far less intrusive than an on-screen bar (which the display-level
-/// capture would bake into the video).
-fn show_recording_tray(app: &tauri::AppHandle) {
-    let app = app.clone();
-    let _ = app.clone().run_on_main_thread(move || {
-        if app.tray_by_id("rec_ctrl").is_some() {
-            return;
-        }
-        let pause = match MenuItem::with_id(&app, "rec_pause", "Pause / Resume", true, None::<&str>)
-        {
-            Ok(i) => i,
-            Err(_) => return,
-        };
-        let stop = match MenuItem::with_id(&app, "rec_stop", "Stop Recording", true, None::<&str>) {
-            Ok(i) => i,
-            Err(_) => return,
-        };
-        let menu = match Menu::with_items(&app, &[&pause, &stop]) {
-            Ok(m) => m,
-            Err(_) => return,
-        };
-        // Generate a red dot icon (systemRed) so the menu bar clearly shows
-        // "recording".
-        let size = 32u32;
-        let mut rgba = vec![0u8; (size * size * 4) as usize];
-        let c = size as f32 / 2.0;
-        let r = 9.0;
-        for y in 0..size {
-            for x in 0..size {
-                let dx = x as f32 - c + 0.5;
-                let dy = y as f32 - c + 0.5;
-                if dx * dx + dy * dy <= r * r {
-                    let i = ((y * size + x) * 4) as usize;
-                    rgba[i] = 255;
-                    rgba[i + 1] = 59;
-                    rgba[i + 2] = 48;
-                    rgba[i + 3] = 255;
-                }
+/// Build a 32×32 RGBA menu-bar icon from a per-pixel closure.
+fn make_status_icon(
+    draw: impl Fn(u32, u32) -> Option<[u8; 4]>,
+) -> tauri::image::Image<'static> {
+    let size = 32u32;
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            if let Some(px) = draw(x, y) {
+                let i = ((y * size + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&px);
             }
         }
-        let icon = tauri::image::Image::new_owned(rgba, size, size);
-        let _ = TrayIconBuilder::with_id("rec_ctrl")
-            .icon(icon)
-            .menu(&menu)
-            .show_menu_on_left_click(true)
-            .on_menu_event(|app, event| match event.id.as_ref() {
-                "rec_pause" => commands::recorder::do_pause_toggle(app),
-                "rec_stop" => {
-                    commands::recorder::do_stop(app);
+    }
+    tauri::image::Image::new_owned(rgba, size, size)
+}
+
+/// Two menu-bar status items shown WHILE recording — a Pause/Resume button and a
+/// Stop button (direct click, no dropdown). Less intrusive than an on-screen bar.
+fn show_recording_tray(app: &tauri::AppHandle) {
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if app.tray_by_id("rec_pause").is_some() {
+            return;
+        }
+        // ⏸ two bars (template → tints to the menu bar colour).
+        let pause_icon = make_status_icon(|x, y| {
+            if (9..23).contains(&y) && ((11..=14).contains(&x) || (17..=20).contains(&x)) {
+                Some([255, 255, 255, 255])
+            } else {
+                None
+            }
+        });
+        // ■ red square.
+        let stop_icon = make_status_icon(|x, y| {
+            if (10..22).contains(&y) && (10..22).contains(&x) {
+                Some([255, 59, 48, 255])
+            } else {
+                None
+            }
+        });
+
+        let _ = TrayIconBuilder::with_id("rec_pause")
+            .icon(pause_icon)
+            .icon_as_template(true)
+            .tooltip("Pause / Resume recording")
+            .show_menu_on_left_click(false)
+            .on_tray_icon_event(|tray, event| {
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    commands::recorder::do_pause_toggle(tray.app_handle());
                 }
-                _ => {}
+            })
+            .build(&app);
+
+        let _ = TrayIconBuilder::with_id("rec_stop")
+            .icon(stop_icon)
+            .tooltip("Stop recording")
+            .show_menu_on_left_click(false)
+            .on_tray_icon_event(|tray, event| {
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    commands::recorder::do_stop(tray.app_handle());
+                }
             })
             .build(&app);
     });
 }
 
 fn hide_recording_tray(app: &tauri::AppHandle) {
-    let _ = app.remove_tray_by_id("rec_ctrl");
+    let _ = app.remove_tray_by_id("rec_pause");
+    let _ = app.remove_tray_by_id("rec_stop");
 }
 
 /// Open (or focus) the Loom-style record control toolbar — a small always-on-top

@@ -71,8 +71,10 @@ pub fn start_recording(app: AppHandle, opts: RecordOptions) -> Result<(), String
         "[recorder] start source={} window={:?} monitor={:?} mic={} camera={}",
         opts.source, opts.window_id, opts.monitor, opts.mic, opts.camera
     );
-    // TODO(capture-engine): start ScreenCaptureKit SCStream (+ AVFoundation mic/
-    // camera) and feed AVAssetWriter. For now flip state so the UI flow works.
+    // Native AVFoundation capture (main display). Window-only + camera bubble
+    // come next; for now we record the screen (+ mic) to a .mov.
+    let path = crate::services::recorder::start(opts.mic)?;
+    println!("[recorder] recording to {}", path);
     RECORDING.store(true, Ordering::SeqCst);
     PAUSED.store(false, Ordering::SeqCst);
     let _ = app.emit("recording-state", status());
@@ -84,6 +86,7 @@ pub fn pause_recording(app: AppHandle) -> Result<(), String> {
     if !RECORDING.load(Ordering::SeqCst) {
         return Err("not recording".into());
     }
+    crate::services::recorder::pause();
     PAUSED.store(true, Ordering::SeqCst);
     let _ = app.emit("recording-state", status());
     Ok(())
@@ -94,6 +97,7 @@ pub fn resume_recording(app: AppHandle) -> Result<(), String> {
     if !RECORDING.load(Ordering::SeqCst) {
         return Err("not recording".into());
     }
+    crate::services::recorder::resume();
     PAUSED.store(false, Ordering::SeqCst);
     let _ = app.emit("recording-state", status());
     Ok(())
@@ -106,9 +110,14 @@ pub fn stop_recording(app: AppHandle) -> Result<Option<String>, String> {
     if !RECORDING.load(Ordering::SeqCst) {
         return Ok(None);
     }
+    let path = crate::services::recorder::stop();
     RECORDING.store(false, Ordering::SeqCst);
     PAUSED.store(false, Ordering::SeqCst);
     let _ = app.emit("recording-state", status());
-    // TODO(capture-engine): finalize the AVAssetWriter and return the temp path.
-    Ok(None)
+    if let Some(ref p) = path {
+        println!("[recorder] stopped, saved {}", p);
+        // Surface where it saved (preview+timeline window comes next).
+        crate::services::hud::show(&app, &format!("Recording saved → {}", p));
+    }
+    Ok(path)
 }

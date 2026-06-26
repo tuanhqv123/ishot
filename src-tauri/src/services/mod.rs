@@ -13,3 +13,4 @@ pub mod settings;
 pub mod keychain;
 pub mod settings_panel;
 pub mod ai_chat;
+pub mod recorder;

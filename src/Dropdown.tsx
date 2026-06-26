@@ -1,0 +1,140 @@
+import { useEffect, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
+
+export interface DropdownOption {
+	value: string;
+	label: string;
+}
+
+/**
+ * Reusable custom dropdown matching the app's dark-frosted aesthetic (HUD /
+ * Settings panel) — replaces the out-of-place native <select>. Self-contained
+ * inline styles so it looks identical in any window (Settings, record bar).
+ */
+export default function Dropdown({
+	value,
+	options,
+	onChange,
+	minWidth,
+}: {
+	value: string;
+	options: DropdownOption[];
+	onChange: (v: string) => void;
+	minWidth?: number;
+}) {
+	const [open, setOpen] = useState(false);
+	const ref = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		if (!open) return;
+		const close = (e: MouseEvent) => {
+			if (ref.current && !ref.current.contains(e.target as Node))
+				setOpen(false);
+		};
+		document.addEventListener("mousedown", close);
+		return () => document.removeEventListener("mousedown", close);
+	}, [open]);
+
+	const current = options.find((o) => o.value === value);
+
+	return (
+		<div
+			ref={ref}
+			style={{ position: "relative", flex: 1, minWidth: minWidth ?? 0 }}
+		>
+			<button
+				type="button"
+				onClick={() => setOpen((o) => !o)}
+				style={{
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "space-between",
+					gap: 8,
+					width: "100%",
+					height: 30,
+					padding: "0 10px",
+					borderRadius: 7,
+					border: "none",
+					background: open ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.1)",
+					color: "rgba(255,255,255,0.98)",
+					fontSize: 13,
+					fontFamily: "inherit",
+					cursor: "pointer",
+					outline: "none",
+				}}
+			>
+				<span
+					style={{
+						overflow: "hidden",
+						textOverflow: "ellipsis",
+						whiteSpace: "nowrap",
+					}}
+				>
+					{current?.label ?? value}
+				</span>
+				<ChevronDown size={15} style={{ opacity: 0.55, flexShrink: 0 }} />
+			</button>
+			{open && (
+				<ul
+					role="listbox"
+					style={{
+						position: "absolute",
+						top: "calc(100% + 4px)",
+						left: 0,
+						right: 0,
+						maxHeight: 260,
+						overflowY: "auto",
+						margin: 0,
+						padding: 4,
+						listStyle: "none",
+						background: "rgba(44,44,46,0.98)",
+						borderRadius: 8,
+						boxShadow:
+							"0 10px 30px rgba(0,0,0,0.5), inset 0 0 0 0.5px rgba(255,255,255,0.1)",
+						backdropFilter: "blur(20px)",
+						WebkitBackdropFilter: "blur(20px)",
+						zIndex: 1000,
+					}}
+				>
+					{options.map((o) => {
+						const sel = o.value === value;
+						return (
+							<li
+								key={o.value}
+								role="option"
+								aria-selected={sel}
+								onClick={() => {
+									onChange(o.value);
+									setOpen(false);
+								}}
+								onMouseEnter={(e) => {
+									if (!sel)
+										(e.currentTarget as HTMLElement).style.background =
+											"rgba(255,255,255,0.1)";
+								}}
+								onMouseLeave={(e) => {
+									if (!sel)
+										(e.currentTarget as HTMLElement).style.background =
+											"transparent";
+								}}
+								style={{
+									padding: "6px 10px",
+									borderRadius: 5,
+									fontSize: 13,
+									cursor: "pointer",
+									whiteSpace: "nowrap",
+									overflow: "hidden",
+									textOverflow: "ellipsis",
+									color: sel ? "#fff" : "rgba(255,255,255,0.9)",
+									background: sel ? "rgba(10,132,255,0.9)" : "transparent",
+								}}
+							>
+								{o.label}
+							</li>
+						);
+					})}
+				</ul>
+			)}
+		</div>
+	);
+}

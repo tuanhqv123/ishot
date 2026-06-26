@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import Dropdown, { type DropdownOption } from "./Dropdown";
 import {
 	Mic,
 	MicOff,
@@ -99,6 +100,20 @@ export default function Recording() {
 
 	const close = () => getCurrentWindow().close();
 
+	const sourceOptions: DropdownOption[] = [
+		...(targets?.monitors.map((_, i) => ({
+			value: `screen:${i}`,
+			label:
+				(targets?.monitors.length ?? 0) > 1
+					? `Entire screen ${i + 1}`
+					: "Entire screen",
+		})) ?? []),
+		...(targets?.windows.slice(0, 40).map((w) => ({
+			value: `window:${w.id}`,
+			label: w.title ? `${w.app_name} — ${w.title}` : w.app_name,
+		})) ?? []),
+	];
+
 	const pill =
 		"flex items-center justify-center rounded-full transition-colors";
 	const toggleCls = (on: boolean) =>
@@ -108,25 +123,11 @@ export default function Recording() {
 		<div className="flex h-screen w-screen items-center gap-2.5 rounded-2xl bg-[rgba(28,28,30,0.92)] px-3 text-white shadow-[0_10px_36px_rgba(0,0,0,0.45)] backdrop-blur-2xl select-none">
 			{!status.recording ? (
 				<>
-					<select
+					<Dropdown
 						value={source}
-						onChange={(e) => setSource(e.target.value)}
-						className="h-9 flex-1 min-w-0 rounded-lg border border-white/15 bg-white/8 px-2 text-[13px] text-white outline-none"
-					>
-						{targets?.monitors.map((_, i) => (
-							<option key={`screen:${i}`} value={`screen:${i}`}>
-								{targets.monitors.length > 1
-									? `Entire screen ${i + 1}`
-									: "Entire screen"}
-							</option>
-						))}
-						{targets?.windows.slice(0, 40).map((w) => (
-							<option key={`window:${w.id}`} value={`window:${w.id}`}>
-								{w.app_name}
-								{w.title ? ` — ${w.title}` : ""}
-							</option>
-						))}
-					</select>
+						onChange={setSource}
+						options={sourceOptions}
+					/>
 
 					<button
 						type="button"

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { GRADIENT_PRESETS, gradientCss } from "./gradients";
+import Dropdown from "./Dropdown";
 
 // Modifier bitmask mirrors the Rust side: 1=Cmd, 2=Shift, 4=Alt, 8=Ctrl.
 const MOD_META = 1;
@@ -559,49 +560,43 @@ export default function Settings() {
             {/* Type dropdown — compact, replaces the long swatch grid. */}
             <div className="st-row">
               <div className="st-label">Type</div>
-              <select
-                className="st-select"
+              <Dropdown
                 value={app.kind}
-                onChange={(e) => onKindChange(e.target.value as AppearanceKind)}
-              >
-                <option value="gradient">Gradient</option>
-                <option value="color">Solid color</option>
-                <option value="wallpaper">Current wallpaper</option>
-                <option value="image">Custom image…</option>
-              </select>
+                onChange={(v) => onKindChange(v as AppearanceKind)}
+                options={[
+                  { value: "gradient", label: "Gradient" },
+                  { value: "color", label: "Solid color" },
+                  { value: "wallpaper", label: "Current wallpaper" },
+                  { value: "image", label: "Custom image…" },
+                ]}
+              />
             </div>
 
             {app.kind === "gradient" && (
               <div className="st-row">
                 <div className="st-label">Style</div>
-                <select
-                  className="st-select"
+                <Dropdown
                   value={app.value}
-                  onChange={(e) => updateAppearance({ value: e.target.value })}
-                >
-                  {GRADIENT_PRESETS.map((g) => (
-                    <option key={g.id} value={g.id}>
-                      {g.id.charAt(0).toUpperCase() + g.id.slice(1)}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => updateAppearance({ value: v })}
+                  options={GRADIENT_PRESETS.map((g) => ({
+                    value: g.id,
+                    label: g.id.charAt(0).toUpperCase() + g.id.slice(1),
+                  }))}
+                />
               </div>
             )}
 
             {app.kind === "color" && (
               <div className="st-row">
                 <div className="st-label">Color</div>
-                <select
-                  className="st-select"
+                <Dropdown
                   value={app.value}
-                  onChange={(e) => updateAppearance({ value: e.target.value })}
-                >
-                  {COLOR_PRESETS.map((c) => (
-                    <option key={c} value={c}>
-                      {COLOR_LABELS[c] ?? c}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(v) => updateAppearance({ value: v })}
+                  options={COLOR_PRESETS.map((c) => ({
+                    value: c,
+                    label: COLOR_LABELS[c] ?? c,
+                  }))}
+                />
               </div>
             )}
 

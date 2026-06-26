@@ -215,6 +215,14 @@ export default function Settings() {
   // shown in the footer.
   const [autostart, setAutostart] = useState(false);
   const [version, setVersion] = useState("");
+  // "Support" toggles into two region options (both open a web link).
+  const [donateOpen, setDonateOpen] = useState(false);
+
+  const openUrl = (url: string) => {
+    invoke("plugin:shell|open", { path: url }).catch((e) =>
+      console.error("open url failed", e),
+    );
+  };
 
   useEffect(() => {
     (async () => {
@@ -585,14 +593,68 @@ export default function Settings() {
             </div>
           </div>
         </section>
+
+        <section className="st-section">
+          <div className="st-about">
+            {/* App name = hyperlink to the repo so people can star it. */}
+            <button
+              type="button"
+              className="st-about-name"
+              title="Star on GitHub ★"
+              onClick={() => openUrl("https://github.com/tuanhqv123/ishot")}
+            >
+              iShot {version}
+            </button>
+            <div className="st-about-tagline">
+              If iShot saves you a few clicks every day, that already means a
+              lot.
+            </div>
+
+            {/* "Support" → REPLACED by the two region options when clicked. */}
+            {!donateOpen && (
+              <button
+                type="button"
+                className="st-support-btn"
+                onClick={() => setDonateOpen(true)}
+              >
+                Support
+              </button>
+            )}
+
+            {donateOpen && (
+              <div className="st-donate-panel">
+                <div className="st-donate-choose">
+                  <button
+                    type="button"
+                    className="st-donate-opt"
+                    onClick={() => {
+                      openUrl("https://ko-fi.com/tuantran1849");
+                      setDonateOpen(false);
+                    }}
+                  >
+                    International
+                  </button>
+                  <button
+                    type="button"
+                    className="st-donate-opt"
+                    onClick={() => {
+                      openUrl(
+                        "https://vietqr.app/img?acc=1409200477&bank=Techcombank&template=qronly&showinfo=true",
+                      );
+                      setDonateOpen(false);
+                    }}
+                  >
+                    Vietnam
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
       </div>
 
       <div className="st-footer">
-        {status ? (
-          <div className="st-status">{status}</div>
-        ) : (
-          <div className="st-status">{version ? `iShot ${version}` : ""}</div>
-        )}
+        {status && <div className="st-status">{status}</div>}
         <div className="st-footer-buttons">
           <button className="st-btn st-btn-primary" onClick={hide} type="button">
             Done

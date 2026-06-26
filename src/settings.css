@@ -154,6 +154,100 @@ html, body, #root {
   color: rgba(255, 255, 255, 0.98);
 }
 
+/* About / donate — centered block. */
+.st-about {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+}
+/* App name = clickable title linking to the repo (for stars). */
+.st-about-name {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.95);
+  cursor: pointer;
+}
+.st-about-name:hover {
+  color: #0a84ff;
+  text-decoration: underline;
+}
+.st-about-tagline {
+  max-width: 320px;
+  font-size: 12px;
+  line-height: 1.5;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.92);
+}
+/* Plain, neutral "Support" button — no colour, no icon. */
+.st-support-btn {
+  height: 30px;
+  padding: 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.st-support-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.32);
+}
+.st-donate-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.st-donate-choose {
+  display: flex;
+  gap: 8px;
+}
+.st-donate-opt {
+  height: 32px;
+  padding: 0 18px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  cursor: pointer;
+}
+.st-donate-opt:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+.st-donate-opt.active {
+  background: rgba(10, 132, 255, 0.9);
+  border-color: rgba(10, 132, 255, 0.9);
+  color: #fff;
+}
+.st-donate-vn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.st-donate-qr {
+  width: 200px;
+  height: 200px;
+  border-radius: 10px;
+  background: #fff;
+  object-fit: contain;
+}
+.st-donate-vn-note {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
 .st-footer {
   padding: 12px 20px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);

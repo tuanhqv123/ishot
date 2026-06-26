@@ -16,20 +16,31 @@ export default function Dropdown({
 	options,
 	onChange,
 	minWidth,
+	openUp,
+	onOpenChange,
 }: {
 	value: string;
 	options: DropdownOption[];
 	onChange: (v: string) => void;
 	minWidth?: number;
+	/** Open the menu above the trigger (for bars pinned to the screen bottom). */
+	openUp?: boolean;
+	/** Notified when the menu opens/closes (e.g. to resize a tiny host window). */
+	onOpenChange?: (open: boolean) => void;
 }) {
 	const [open, setOpen] = useState(false);
 	const ref = useRef<HTMLDivElement>(null);
+
+	const setOpenNotify = (v: boolean) => {
+		setOpen(v);
+		onOpenChange?.(v);
+	};
 
 	useEffect(() => {
 		if (!open) return;
 		const close = (e: MouseEvent) => {
 			if (ref.current && !ref.current.contains(e.target as Node))
-				setOpen(false);
+				setOpenNotify(false);
 		};
 		document.addEventListener("mousedown", close);
 		return () => document.removeEventListener("mousedown", close);
@@ -44,7 +55,7 @@ export default function Dropdown({
 		>
 			<button
 				type="button"
-				onClick={() => setOpen((o) => !o)}
+				onClick={() => setOpenNotify(!open)}
 				style={{
 					display: "flex",
 					alignItems: "center",
@@ -79,7 +90,8 @@ export default function Dropdown({
 					role="listbox"
 					style={{
 						position: "absolute",
-						top: "calc(100% + 4px)",
+						top: openUp ? undefined : "calc(100% + 4px)",
+						bottom: openUp ? "calc(100% + 4px)" : undefined,
 						left: 0,
 						right: 0,
 						maxHeight: 260,
@@ -89,8 +101,7 @@ export default function Dropdown({
 						listStyle: "none",
 						background: "rgba(44,44,46,0.98)",
 						borderRadius: 8,
-						boxShadow:
-							"0 10px 30px rgba(0,0,0,0.5), inset 0 0 0 0.5px rgba(255,255,255,0.1)",
+						boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
 						backdropFilter: "blur(20px)",
 						WebkitBackdropFilter: "blur(20px)",
 						zIndex: 1000,

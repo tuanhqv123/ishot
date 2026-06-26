@@ -251,6 +251,24 @@ export default function Settings() {
     return () => window.removeEventListener("keydown", onKey);
   }, [hide]);
 
+  // Auto-save: persist on any change (debounced) so the user never has to
+  // remember to hit Save. Skips the first run after load so opening Settings
+  // doesn't trigger a redundant write.
+  const savedOnce = useRef(false);
+  useEffect(() => {
+    if (!loaded || !settings) return;
+    if (!savedOnce.current) {
+      savedOnce.current = true;
+      return;
+    }
+    const t = setTimeout(() => {
+      invoke("save_settings", { settings }).catch((e) =>
+        console.error("auto-save failed", e),
+      );
+    }, 400);
+    return () => clearTimeout(t);
+  }, [settings, loaded]);
+
   if (!loaded || !settings) {
     return <div className="st-root"><div className="st-loading">Loading…</div></div>;
   }
@@ -319,17 +337,6 @@ export default function Settings() {
 
   const app = settings.appearance;
   const previewBg = backgroundCss(app, wallpaperSrc);
-
-  const onSave = async () => {
-    try {
-      await invoke("save_settings", { settings });
-      setStatus("Saved.");
-      setTimeout(() => setStatus(null), 1500);
-    } catch (e) {
-      console.error("save_settings failed", e);
-      setStatus(`Save failed: ${e}`);
-    }
-  };
 
   const onSaveKey = async () => {
     if (!apiKeyInput.trim()) return;
@@ -613,26 +620,9 @@ export default function Settings() {
               </div>
             )}
 
-            {/* Single live preview + both sliders, side by side (compact). */}
+            {/* Sliders (left) + live preview (right), side by side. The preview
+                updates radius/padding/shadow live as the user drags. */}
             <div className="st-row st-bg-preview-row">
-              <div
-                className={
-                  "st-preview-tile" +
-                  (app.kind === "gradient" || app.kind === "color"
-                    ? " grain"
-                    : "")
-                }
-                style={{ background: previewBg }}
-              >
-                <div
-                  className="st-preview-shot"
-                  style={{
-                    borderRadius: app.radius,
-                    inset: `${Math.round((app.padding / 160) * 26)}px`,
-                    boxShadow: app.shadow ? "0 2px 7px rgba(0,0,0,0.4)" : "none",
-                  }}
-                />
-              </div>
               <div className="st-bg-sliders">
                 <div className="st-slider-label">
                   <span>Radius</span>
@@ -675,6 +665,24 @@ export default function Settings() {
                   </button>
                 </div>
               </div>
+              <div
+                className={
+                  "st-preview-tile" +
+                  (app.kind === "gradient" || app.kind === "color"
+                    ? " grain"
+                    : "")
+                }
+                style={{ background: previewBg }}
+              >
+                <div
+                  className="st-preview-shot"
+                  style={{
+                    borderRadius: app.radius,
+                    inset: `${Math.round((app.padding / 160) * 26)}px`,
+                    boxShadow: app.shadow ? "0 2px 7px rgba(0,0,0,0.4)" : "none",
+                  }}
+                />
+              </div>
             </div>
           </div>
         </section>
@@ -683,11 +691,8 @@ export default function Settings() {
       <div className="st-footer">
         {status && <div className="st-status">{status}</div>}
         <div className="st-footer-buttons">
-          <button className="st-btn st-btn-ghost" onClick={hide} type="button">
-            Cancel
-          </button>
-          <button className="st-btn st-btn-primary" onClick={onSave} type="button">
-            Save
+          <button className="st-btn st-btn-primary" onClick={hide} type="button">
+            Done
           </button>
         </div>
       </div>

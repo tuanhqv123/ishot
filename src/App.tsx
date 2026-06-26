@@ -4603,8 +4603,8 @@ function RoughLevelIcon({
 		// preview — the actual shapes use roughFor()'s gentler numbers.
 		const ICON: Record<Sloppiness, { r: number; b: number; multi: boolean }> = {
 			0: { r: 0, b: 0, multi: false },
-			1: { r: 1.8, b: 1.3, multi: false },
-			2: { r: 3.6, b: 1.8, multi: true },
+			1: { r: 1.3, b: 1.1, multi: false },
+			2: { r: 2.4, b: 1.4, multi: false },
 		};
 		const cfg = ICON[level];
 		const pts: [number, number][] = [

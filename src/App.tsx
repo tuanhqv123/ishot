@@ -12,6 +12,8 @@ import {
 	Fullscreen,
 	GripVertical,
 	Languages,
+	Mic,
+	MicOff,
 	Minus,
 	Palette,
 	PencilSparkles,
@@ -22,6 +24,7 @@ import {
 	Square,
 	Undo2,
 	Video,
+	VideoOff,
 	X,
 	type LucideIcon,
 } from "lucide-react";
@@ -30,6 +33,7 @@ import remarkGfm from "remark-gfm";
 import rough from "roughjs";
 import { getStroke } from "perfect-freehand";
 import { gradientById } from "./gradients";
+import Dropdown from "./Dropdown";
 
 // Cached procedural grain tile, overlaid on gradient/solid backgrounds so the
 // exported image has the same subtle noise texture as the Settings preview.
@@ -1060,30 +1064,51 @@ function App() {
 		}
 	}, [renderFinalImage, cancelCapture]);
 
-	// Record the current selection as screen video: hide the overlay first (so
-	// it isn't captured), start recording cropped to the selection's global
-	// rect, then show the floating record controls (Stop/Pause/timer).
-	const handleRecord = useCallback(async () => {
-		if (!selection) return;
+	// Record controls live in a Row-2 options bar under the toolbar (like the
+	// draw/blur tool options), opened by the Record (Video) button.
+	const [showRecordOpts, setShowRecordOpts] = useState(false);
+	const [recordSource, setRecordSource] = useState("selection");
+	const [recordMic, setRecordMic] = useState(false);
+	const [recordCamera, setRecordCamera] = useState(false);
+
+	const toggleRecordCamera = useCallback(() => {
+		setRecordCamera((on) => {
+			const next = !on;
+			invoke(next ? "open_camera_bubble" : "close_camera_bubble").catch(
+				() => {},
+			);
+			return next;
+		});
+	}, []);
+
+	// Start recording the chosen source: hide the overlay (so it isn't in the
+	// video), start capture, then show the floating Stop/Pause/timer controls.
+	const handleStartRecording = useCallback(async () => {
 		const dc = findDisplay();
 		const mon = dc?.monitor;
-		const crop = mon
-			? [
-					mon.x + selection.x,
-					mon.y + selection.y,
-					selection.width,
-					selection.height,
-				]
-			: null;
+		let source = "screen";
+		let window_id: number | null = null;
+		let crop: number[] | null = null;
+		if (recordSource === "selection" && selection && mon) {
+			crop = [
+				mon.x + selection.x,
+				mon.y + selection.y,
+				selection.width,
+				selection.height,
+			];
+		} else if (recordSource.startsWith("window:")) {
+			source = "window";
+			window_id = Number(recordSource.split(":")[1]);
+		}
 		await cancelCapture();
 		try {
 			await invoke("start_recording", {
 				opts: {
-					source: "screen",
-					window_id: null,
+					source,
+					window_id,
 					monitor: null,
-					mic: false,
-					camera: false,
+					mic: recordMic,
+					camera: recordCamera,
 					crop,
 				},
 			});
@@ -1091,7 +1116,14 @@ function App() {
 		} catch (e) {
 			console.error("start_recording", e);
 		}
-	}, [selection, findDisplay, cancelCapture]);
+	}, [
+		recordSource,
+		selection,
+		findDisplay,
+		cancelCapture,
+		recordMic,
+		recordCamera,
+	]);
 
 	const handleSave = useCallback(async () => {
 		const bytes = await renderFinalImage();
@@ -1553,6 +1585,7 @@ function App() {
 			closeAiPanel();
 			closeTranslatePanel();
 			exitScrollReady();
+			setShowRecordOpts(false);
 			setTool(newTool);
 			setSelectedAnnotation(null);
 			if (newTool === "text" && textBlocks.length === 0 && !ocrLoading)
@@ -3291,7 +3324,8 @@ function App() {
 								tool === "draw" ||
 								tool === "textbox" ||
 								tool === "blur" ||
-								!!selectedBlurAnn;
+								!!selectedBlurAnn ||
+								showRecordOpts;
 							// row1: 32px buttons + 2×6px padding = 44. row2: 28px controls
 							// + 2×6px padding = 40. Keep in sync with --ctrl/--pad tokens.
 							const row1H = 44,
@@ -3436,8 +3470,12 @@ function App() {
 											)}
 										</ToolBtn>
 										<ToolBtn
-											onClick={handleRecord}
-											title="Record this selection (screen video)"
+											active={showRecordOpts}
+											onClick={() => {
+												setShowRecordOpts((v) => !v);
+												setTool(null);
+											}}
+											title="Record screen video"
 										>
 											<ToolIcon icon={Video} />
 										</ToolBtn>
@@ -3677,6 +3715,73 @@ function App() {
 													/>
 												</div>
 											)}
+											{/* Record options — source dropdown + mic/camera +
+											    Record, shown below the toolbar like draw/blur. */}
+											{showRecordOpts && (
+												<div
+													style={{
+														display: "flex",
+														alignItems: "center",
+														gap: 6,
+														padding: "0 4px",
+													}}
+												>
+													<Dropdown
+														light
+														value={recordSource}
+														onChange={setRecordSource}
+														minWidth={150}
+														options={[
+															...(selection
+																? [{ value: "selection", label: "Selection" }]
+																: []),
+															{ value: "screen:0", label: "Entire screen" },
+															...snappedWindows.slice(0, 30).map((w) => ({
+																value: `window:${w.id}`,
+																label: w.title
+																	? `${w.app_name} — ${w.title}`
+																	: w.app_name,
+															})),
+														]}
+													/>
+													<ToolBtn
+														active={recordMic}
+														onClick={() => setRecordMic((v) => !v)}
+														title="Microphone"
+													>
+														<ToolIcon icon={recordMic ? Mic : MicOff} />
+													</ToolBtn>
+													<ToolBtn
+														active={recordCamera}
+														onClick={toggleRecordCamera}
+														title="Camera"
+													>
+														<ToolIcon icon={recordCamera ? Video : VideoOff} />
+													</ToolBtn>
+													<button
+														type="button"
+														onClick={handleStartRecording}
+														title="Start recording"
+														style={{
+															height: 28,
+															padding: "0 12px",
+															border: "none",
+															borderRadius: "var(--radius-s)",
+															cursor: "pointer",
+															background: "#ff3b30",
+															color: "#fff",
+															fontSize: 13,
+															fontWeight: 600,
+															display: "flex",
+															alignItems: "center",
+															gap: 6,
+														}}
+													>
+														<Circle size={10} fill="currentColor" />
+														Record
+													</button>
+												</div>
+											)}
 											{/* Color picker — dropdown with swatch grid */}
 											{isDrawTool && (
 												<ColorPicker
@@ -3712,7 +3817,8 @@ function App() {
 								tool === "draw" ||
 								tool === "textbox" ||
 								tool === "blur" ||
-								!!selectedBlurAnn;
+								!!selectedBlurAnn ||
+								showRecordOpts;
 							const row1H = 44,
 								row2H = 40,
 								gap = 4;

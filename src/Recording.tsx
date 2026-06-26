@@ -70,6 +70,11 @@ export default function Recording() {
 		invoke<CaptureTargets>("list_capture_targets")
 			.then(setTargets)
 			.catch((e) => console.error("list_capture_targets", e));
+		// Initialise from current state — the bar is often opened *after*
+		// recording already started (from the toolbar Record flow).
+		invoke<RecordingStatus>("recording_status")
+			.then(setStatus)
+			.catch(() => {});
 		const un = listen<RecordingStatus>("recording-state", (e) =>
 			setStatus(e.payload),
 		);

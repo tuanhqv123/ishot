@@ -684,6 +684,7 @@ fn main() {
             commands::hud::show_hud,
             commands::recorder::list_capture_targets,
             commands::recorder::recording_status,
+            commands::recorder::set_recorder_expanded,
             commands::recorder::start_recording,
             commands::recorder::pause_recording,
             commands::recorder::resume_recording,

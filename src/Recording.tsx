@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import {
 	Mic,
 	MicOff,
@@ -41,12 +40,6 @@ interface RecordingStatus {
 
 type SourceValue = string;
 
-const BAR_W = 540;
-const BAR_H = 68;
-// Extra height the window grows by (upward) while the source menu is open, so
-// the dropdown isn't clipped by the tiny bar window.
-const MENU_EXTRA = 264;
-
 export default function Recording() {
 	const [targets, setTargets] = useState<CaptureTargets | null>(null);
 	const [source, setSource] = useState<SourceValue>("screen:0");
@@ -56,6 +49,21 @@ export default function Recording() {
 		recording: false,
 		paused: false,
 	});
+	const [elapsed, setElapsed] = useState(0);
+
+	// Elapsed timer: counts up while recording and not paused; resets on stop.
+	useEffect(() => {
+		if (!status.recording) {
+			setElapsed(0);
+			return;
+		}
+		if (status.paused) return;
+		const t = setInterval(() => setElapsed((e) => e + 1), 1000);
+		return () => clearInterval(t);
+	}, [status.recording, status.paused]);
+	const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(
+		elapsed % 60,
+	).padStart(2, "0")}`;
 
 	useEffect(() => {
 		invoke<CaptureTargets>("list_capture_targets")
@@ -69,25 +77,13 @@ export default function Recording() {
 		};
 	}, []);
 
-	// Grow the window upward while the menu is open (and restore on close) so the
-	// dropdown has room to render outside the 68px bar.
-	const onMenuOpen = useCallback(async (open: boolean) => {
-		const win = getCurrentWindow();
-		try {
-			const scale = await win.scaleFactor();
-			const phys = await win.outerPosition();
-			const lx = phys.x / scale;
-			const ly = phys.y / scale;
-			if (open) {
-				await win.setSize(new LogicalSize(BAR_W, BAR_H + MENU_EXTRA));
-				await win.setPosition(new LogicalPosition(lx, ly - MENU_EXTRA));
-			} else {
-				await win.setSize(new LogicalSize(BAR_W, BAR_H));
-				await win.setPosition(new LogicalPosition(lx, ly + MENU_EXTRA));
-			}
-		} catch (e) {
-			console.error("resize record bar", e);
-		}
+	// The source menu can exceed the 68px bar window; ask the backend to grow the
+	// window upward (and restore on close) so the menu renders fully. Done in
+	// Rust on the main thread — the only reliable place to size this window.
+	const onMenuOpen = useCallback((open: boolean) => {
+		invoke("set_recorder_expanded", { expanded: open }).catch((e) =>
+			console.error("set_recorder_expanded", e),
+		);
 	}, []);
 
 	const start = useCallback(async () => {
@@ -205,7 +201,10 @@ export default function Recording() {
 							<span
 								className={`h-2.5 w-2.5 rounded-full bg-[#ff453a] ${status.paused ? "" : "animate-pulse"}`}
 							/>
-							{status.paused ? "Paused" : "Recording…"}
+							<span className="tabular-nums font-medium">{mmss}</span>
+							<span className="text-white/55">
+								{status.paused ? "Paused" : ""}
+							</span>
 						</div>
 						<button
 							type="button"

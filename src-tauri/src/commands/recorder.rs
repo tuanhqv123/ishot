@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::services::screen_capture::{MonitorInfo, ScreenCaptureService};
 use crate::services::window_enum::{snapshot_windows, WindowInfo};
@@ -60,6 +60,34 @@ pub fn list_capture_targets() -> Result<CaptureTargets, String> {
 #[tauri::command]
 pub fn recording_status() -> RecordingStatus {
     status()
+}
+
+/// Grow/shrink the record-bar window so its source dropdown can render outside
+/// the 68px bar. Done in Rust on the main thread (JS `setSize` proved
+/// unreliable for this transparent always-on-top window). The bar is pinned to
+/// the window's bottom, so we grow upward and restore on close.
+const BAR_W: f64 = 540.0;
+const BAR_H: f64 = 68.0;
+const MENU_EXTRA: f64 = 264.0;
+
+#[tauri::command]
+pub fn set_recorder_expanded(app: AppHandle, expanded: bool) {
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(w) = app2.get_webview_window("recorder_bar") else {
+            return;
+        };
+        let scale = w.scale_factor().unwrap_or(1.0);
+        let extra_px = (MENU_EXTRA * scale) as i32;
+        let Ok(pos) = w.outer_position() else { return };
+        if expanded {
+            let _ = w.set_size(tauri::LogicalSize::<f64>::new(BAR_W, BAR_H + MENU_EXTRA));
+            let _ = w.set_position(tauri::PhysicalPosition::<i32>::new(pos.x, pos.y - extra_px));
+        } else {
+            let _ = w.set_size(tauri::LogicalSize::<f64>::new(BAR_W, BAR_H));
+            let _ = w.set_position(tauri::PhysicalPosition::<i32>::new(pos.x, pos.y + extra_px));
+        }
+    });
 }
 
 #[tauri::command]

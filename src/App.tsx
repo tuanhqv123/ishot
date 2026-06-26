@@ -111,6 +111,10 @@ interface Annotation {
 	h?: number;
 	ex?: number;
 	ey?: number;
+	/// Optional bend control point for arrow/line — drag the middle handle to
+	/// curve it (quadratic Bézier). Absent = straight.
+	cx?: number;
+	cy?: number;
 	path?: { x: number; y: number }[];
 	blurStrength?: number;
 	blurMode?: "rect" | "draw";
@@ -150,7 +154,15 @@ function roughFor(s: Sloppiness | undefined): { roughness: number; bowing: numbe
 type ShapeSpec =
 	| { kind: "rect"; x: number; y: number; w: number; h: number }
 	| { kind: "oval"; cx: number; cy: number; w: number; h: number }
-	| { kind: "line"; x1: number; y1: number; x2: number; y2: number }
+	| {
+			kind: "line";
+			x1: number;
+			y1: number;
+			x2: number;
+			y2: number;
+			cx?: number;
+			cy?: number;
+	  }
 	| {
 			kind: "arrow";
 			x1: number;
@@ -159,6 +171,8 @@ type ShapeSpec =
 			y2: number;
 			headLen: number;
 			spread: number;
+			cx?: number;
+			cy?: number;
 	  };
 
 // Single place that renders rect / oval / line / arrow, shared by the committed
@@ -176,26 +190,6 @@ function paintShape(
 	style: { color: string; lw: number; seed: number },
 ) {
 	const { color, lw, seed } = style;
-	const arrowHead = (
-		emit: (fromX: number, fromY: number, toX: number, toY: number) => void,
-		a: Extract<ShapeSpec, { kind: "arrow" }>,
-	) => {
-		const angle = Math.atan2(a.y2 - a.y1, a.x2 - a.x1);
-		emit(a.x1, a.y1, a.x2, a.y2);
-		emit(
-			a.x2,
-			a.y2,
-			a.x2 - a.headLen * Math.cos(angle - a.spread),
-			a.y2 - a.headLen * Math.sin(angle - a.spread),
-		);
-		emit(
-			a.x2,
-			a.y2,
-			a.x2 - a.headLen * Math.cos(angle + a.spread),
-			a.y2 - a.headLen * Math.sin(angle + a.spread),
-		);
-	};
-
 	const ro = roughFor(s);
 	const opts = {
 		stroke: color,
@@ -208,13 +202,49 @@ function paintShape(
 		disableMultiStroke: s <= 1,
 		disableMultiStrokeFill: s <= 1,
 	};
+
+	// Shaft of a line/arrow: a straight segment, or a quadratic Bézier when a
+	// bend control point (cx,cy) is present.
+	const shaft = (
+		x1: number,
+		y1: number,
+		x2: number,
+		y2: number,
+		cx?: number,
+		cy?: number,
+	) => {
+		if (cx !== undefined && cy !== undefined)
+			rc.path(`M ${x1} ${y1} Q ${cx} ${cy} ${x2} ${y2}`, opts);
+		else rc.line(x1, y1, x2, y2, opts);
+	};
+
 	if (spec.kind === "rect") rc.rectangle(spec.x, spec.y, spec.w, spec.h, opts);
 	else if (spec.kind === "oval")
 		rc.ellipse(spec.cx, spec.cy, spec.w, spec.h, opts);
 	else if (spec.kind === "line")
-		rc.line(spec.x1, spec.y1, spec.x2, spec.y2, opts);
-	else if (spec.kind === "arrow")
-		arrowHead((fx, fy, tx, ty) => rc.line(fx, fy, tx, ty, opts), spec);
+		shaft(spec.x1, spec.y1, spec.x2, spec.y2, spec.cx, spec.cy);
+	else if (spec.kind === "arrow") {
+		shaft(spec.x1, spec.y1, spec.x2, spec.y2, spec.cx, spec.cy);
+		// Head points along the tangent at the tip: from the control point (if
+		// curved) or the start, toward the end.
+		const fromX = spec.cx ?? spec.x1;
+		const fromY = spec.cy ?? spec.y1;
+		const angle = Math.atan2(spec.y2 - fromY, spec.x2 - fromX);
+		rc.line(
+			spec.x2,
+			spec.y2,
+			spec.x2 - spec.headLen * Math.cos(angle - spec.spread),
+			spec.y2 - spec.headLen * Math.sin(angle - spec.spread),
+			opts,
+		);
+		rc.line(
+			spec.x2,
+			spec.y2,
+			spec.x2 - spec.headLen * Math.cos(angle + spec.spread),
+			spec.y2 - spec.headLen * Math.sin(angle + spec.spread),
+			opts,
+		);
+	}
 }
 
 // Render a freehand stroke as a smooth, naturally-tapered filled path using
@@ -248,11 +278,62 @@ function drawFreehand(
 
 // Translate an annotation by (dx, dy) — used for click-drag move. Each shape
 // type carries its geometry differently.
+// Tight 1-D extent [min,max] of a quadratic Bézier with endpoints a,c and
+// control b — includes the curve's extremum (the control-point hull is looser,
+// which left a visible gap between the curve and its bounding box).
+function quad1D(a: number, b: number, c: number): [number, number] {
+	let lo = Math.min(a, c),
+		hi = Math.max(a, c);
+	const d = a - 2 * b + c;
+	if (d !== 0) {
+		const t = (a - b) / d;
+		if (t > 0 && t < 1) {
+			const v = (1 - t) * (1 - t) * a + 2 * (1 - t) * t * b + t * t * c;
+			lo = Math.min(lo, v);
+			hi = Math.max(hi, v);
+		}
+	}
+	return [lo, hi];
+}
+
+// Tight bounding box of an arrow/line: straight = endpoints; curved = the
+// quadratic Bézier's real extent (so the block hugs the curve).
+function arrowLineBBox(a: Annotation): {
+	minX: number;
+	minY: number;
+	maxX: number;
+	maxY: number;
+} {
+	const x2 = a.ex ?? a.x,
+		y2 = a.ey ?? a.y;
+	if (a.cx === undefined || a.cy === undefined) {
+		return {
+			minX: Math.min(a.x, x2),
+			maxX: Math.max(a.x, x2),
+			minY: Math.min(a.y, y2),
+			maxY: Math.max(a.y, y2),
+		};
+	}
+	const [minX, maxX] = quad1D(a.x, a.cx, x2);
+	const [minY, maxY] = quad1D(a.y, a.cy, y2);
+	return { minX, minY, maxX, maxY };
+}
+
 function moveAnnotation(a: Annotation, dx: number, dy: number): Annotation {
 	if (a.type === "draw" && a.path)
 		return { ...a, path: a.path.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
 	if (a.ex !== undefined)
-		return { ...a, x: a.x + dx, y: a.y + dy, ex: a.ex + dx, ey: (a.ey ?? 0) + dy };
+		return {
+			...a,
+			x: a.x + dx,
+			y: a.y + dy,
+			ex: a.ex + dx,
+			ey: (a.ey ?? 0) + dy,
+			// Carry the optional bend control point so curved arrows/lines move whole.
+			...(a.cx !== undefined
+				? { cx: a.cx + dx, cy: (a.cy ?? 0) + dy }
+				: {}),
+		};
 	return { ...a, x: a.x + dx, y: a.y + dy };
 }
 
@@ -2103,6 +2184,8 @@ function App() {
 					y2: ann.ey!,
 					headLen: Math.max(18, lw * 5.5),
 					spread: Math.PI / 7,
+					cx: ann.cx,
+					cy: ann.cy,
 				}, style);
 			} else if (ann.type === "line" && ann.ex !== undefined) {
 				paintShape(rc, s, {
@@ -2111,6 +2194,8 @@ function App() {
 					y1: ann.y,
 					x2: ann.ex,
 					y2: ann.ey!,
+					cx: ann.cx,
+					cy: ann.cy,
 				}, style);
 			} else if (ann.type === "draw" && ann.path && ann.path.length > 0) {
 				// Smooth, naturally-tapered freehand via perfect-freehand.
@@ -2249,40 +2334,31 @@ function App() {
 				maxY = Math.max(ann.y, ann.y + ann.h!);
 			return x >= minX && x <= maxX && y >= minY && y <= maxY;
 		}
-		if (ann.type === "rect" && ann.w !== undefined) {
+		// Rect & oval: hit-test by the whole BLOCK (bounding box), so clicking
+		// anywhere inside selects/moves it instead of drawing a new shape on top.
+		if (
+			(ann.type === "rect" || ann.type === "oval") &&
+			ann.w !== undefined
+		) {
 			const minX = Math.min(ann.x, ann.x + ann.w),
 				maxX = Math.max(ann.x, ann.x + ann.w);
 			const minY = Math.min(ann.y, ann.y + ann.h!),
 				maxY = Math.max(ann.y, ann.y + ann.h!);
 			return (
-				((Math.abs(x - minX) < tol || Math.abs(x - maxX) < tol) &&
-					y >= minY - tol &&
-					y <= maxY + tol) ||
-				((Math.abs(y - minY) < tol || Math.abs(y - maxY) < tol) &&
-					x >= minX - tol &&
-					x <= maxX + tol)
+				x >= minX - tol && x <= maxX + tol && y >= minY - tol && y <= maxY + tol
 			);
 		}
-		if (ann.type === "oval" && ann.w !== undefined) {
-			const cx = ann.x + ann.w / 2,
-				cy = ann.y + ann.h! / 2;
-			const rx = Math.abs(ann.w / 2),
-				ry = Math.abs(ann.h! / 2);
-			if (rx < 5 || ry < 5) return false;
-			const dist = Math.sqrt(((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2);
-			return Math.abs(dist - 1) < 0.4;
-		}
 		if ((ann.type === "arrow" || ann.type === "line") && ann.ex !== undefined) {
-			const A = x - ann.x,
-				B = y - ann.y,
-				C = ann.ex - ann.x,
-				D = ann.ey! - ann.y;
-			const lenSq = C * C + D * D;
-			if (lenSq === 0) return Math.sqrt(A * A + B * B) < tol;
-			const t = Math.max(0, Math.min(1, (A * C + B * D) / lenSq));
-			const px = ann.x + t * C,
-				py = ann.y + t * D;
-			return Math.sqrt((x - px) ** 2 + (y - py) ** 2) < tol;
+			// Hit-test by the BLOCK = the tight bounding box of the (possibly
+			// curved) shape. Clicking anywhere in the block selects/moves it
+			// instead of drawing a new shape on top.
+			const bb = arrowLineBBox(ann);
+			return (
+				x >= bb.minX - tol &&
+				x <= bb.maxX + tol &&
+				y >= bb.minY - tol &&
+				y <= bb.maxY + tol
+			);
 		}
 		if (ann.type === "draw" && ann.path) {
 			for (const p of ann.path)
@@ -2407,6 +2483,46 @@ function App() {
 		else if (tool === "blur" || tool === "textbox")
 			setTempBlur({ x, y, width: 0, height: 0 });
 	};
+
+	// Drag one of an arrow/line's 3 handles (start / control / end). The control
+	// handle sets the bend point (cx,cy) → quadratic curve. Coords are read off
+	// the annotation canvas (logical px), matching annotation coordinates.
+	const startHandleDrag =
+		(annId: number, which: "start" | "control" | "end") =>
+		(e: React.MouseEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const canvas = canvasRef.current;
+			if (!canvas) return;
+			const move = (ev: MouseEvent) => {
+				const r = canvas.getBoundingClientRect();
+				const x = ev.clientX - r.left;
+				const y = ev.clientY - r.top;
+				setAnnotations((prev) =>
+					prev.map((a) => {
+						if (a.id !== annId) return a;
+						if (which === "start") return { ...a, x, y };
+						if (which === "end") return { ...a, ex: x, ey: y };
+						// Middle dot sits ON the curve (t=0.5). Solve the quadratic
+						// Bézier control point P1 so the curve passes through (x,y):
+						//   B(0.5)=0.25·P0+0.5·P1+0.25·P2 ⇒ P1 = 2M − (P0+P2)/2
+						const ex2 = a.ex ?? a.x;
+						const ey2 = a.ey ?? a.y;
+						return {
+							...a,
+							cx: 2 * x - (a.x + ex2) / 2,
+							cy: 2 * y - (a.y + ey2) / 2,
+						};
+					}),
+				);
+			};
+			const up = () => {
+				window.removeEventListener("mousemove", move);
+				window.removeEventListener("mouseup", up);
+			};
+			window.addEventListener("mousemove", move);
+			window.addEventListener("mouseup", up);
+		};
 
 	// Constrain point with Shift: snap to 45° angles for line/arrow, square for rect, circle for oval
 	const constrainPoint = useCallback(
@@ -3336,6 +3452,88 @@ function App() {
 						onMouseMove={handleCanvasMouseMove}
 						onMouseUp={handleCanvasMouseUp}
 					/>
+
+					{/* Selected arrow/line: faint BLOCK outline (bbox of the 3 points) + 3 white
+    handle dots. Start/end reshape ends; middle dot bends the curve. DOM-only
+    so nothing leaks into the exported image. */}
+{(() => {
+  const sel = annotations.find(
+    (a) =>
+      a.id === selectedAnnotation &&
+      (a.type === "arrow" || a.type === "line") &&
+      a.ex !== undefined,
+  );
+  if (!sel) return null;
+  // Middle dot is shown ON the curve at t=0.5 (the curve does NOT pass through
+  // the Bézier control point, so showing it there would float off the line).
+  const dotX =
+    sel.cx !== undefined
+      ? 0.25 * sel.x + 0.5 * sel.cx + 0.25 * sel.ex!
+      : (sel.x + sel.ex!) / 2;
+  const dotY =
+    sel.cy !== undefined
+      ? 0.25 * sel.y + 0.5 * sel.cy + 0.25 * sel.ey!
+      : (sel.y + sel.ey!) / 2;
+  // Block hugs the actual curve (tight Bézier bbox), not the control point.
+  const bb = arrowLineBBox(sel);
+  const bx0 = bb.minX;
+  const bx1 = bb.maxX;
+  const by0 = bb.minY;
+  const by1 = bb.maxY;
+  const dots: Array<{ px: number; py: number; which: "start" | "control" | "end" }> = [
+    { px: sel.x, py: sel.y, which: "start" },
+    { px: dotX, py: dotY, which: "control" },
+    { px: sel.ex!, py: sel.ey!, which: "end" },
+  ];
+  return (
+    <>
+      <div
+        style={{
+          position: "absolute",
+          left: selection.x + bx0,
+          top: selection.y + by0,
+          width: bx1 - bx0,
+          height: by1 - by0,
+          border: "1px solid rgba(0,122,255,0.55)",
+          borderRadius: 2,
+          pointerEvents: "none",
+          zIndex: 11,
+        }}
+      />
+      {dots.map((d) => (
+        <div
+          key={d.which}
+          onMouseDown={startHandleDrag(sel.id, d.which)}
+          style={{
+            position: "absolute",
+            left: selection.x + d.px,
+            top: selection.y + d.py,
+            width: 18,
+            height: 18,
+            marginLeft: -9,
+            marginTop: -9,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "grab",
+            zIndex: 12,
+          }}
+        >
+          <div
+            style={{
+              width: 9,
+              height: 9,
+              borderRadius: "50%",
+              background: "#fff",
+              border: "1.5px solid #007aff",
+              boxShadow: "0 0 1px rgba(0,0,0,0.4)",
+            }}
+          />
+        </div>
+      ))}
+    </>
+  );
+})()}
 
 
 					{/* Toolbars — flip above if no space below.

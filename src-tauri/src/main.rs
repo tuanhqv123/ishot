@@ -522,7 +522,10 @@ fn main() {
                             trigger_screenshot(app);
                         }
                         "record" => {
-                            open_recorder_window(app);
+                            // Recording is set up in the capture toolbar's Row 2,
+                            // so just open the capture overlay; the user picks the
+                            // Record (Video) tool there.
+                            trigger_screenshot(app);
                         }
                         "launch_at_login" => {
                             let autostart = app.autolaunch();
@@ -837,8 +840,10 @@ fn open_recorder_window(app: &tauri::AppHandle) {
             let _ = w.set_focus();
             return;
         }
-        const BAR_W: f64 = 540.0;
-        const BAR_H: f64 = 68.0;
+        // Small bar — just the red dot + timer + pause + stop (setup is in the
+        // capture toolbar's Row 2).
+        const BAR_W: f64 = 220.0;
+        const BAR_H: f64 = 46.0;
         let monitor = app
             .cursor_position()
             .ok()
@@ -855,7 +860,7 @@ fn open_recorder_window(app: &tauri::AppHandle) {
             }
             None => (200.0, 200.0),
         };
-        let _ = tauri::WebviewWindowBuilder::new(
+        let built = tauri::WebviewWindowBuilder::new(
             &app,
             "recorder_bar",
             tauri::WebviewUrl::App("recording.html".into()),
@@ -866,12 +871,21 @@ fn open_recorder_window(app: &tauri::AppHandle) {
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
-        // resizable(true) is REQUIRED so the JS side can grow the window upward
-        // to show the source dropdown (a 68px window would clip the menu).
-        .resizable(true)
+        .resizable(false)
         .visible(true)
         .build();
-        // TODO(capture-engine): setSharingType:0 so the bar itself isn't recorded.
+        // Hide the control bar from screen capture so it isn't baked into the
+        // recording (the camera bubble is intentionally NOT hidden).
+        if let Ok(win) = built {
+            if let Ok(ns_ptr) = win.ns_window() {
+                if !ns_ptr.is_null() {
+                    let ns_win = ns_ptr as cocoa::base::id;
+                    unsafe {
+                        let _: () = objc::msg_send![ns_win, setSharingType: 0u64];
+                    }
+                }
+            }
+        }
     });
 }
 

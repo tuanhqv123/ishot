@@ -139,9 +139,15 @@ pub fn open_recording_preview(app: AppHandle, path: String) {
     show_preview(&app, &path);
 }
 
-/// Copy the temp recording to a user-chosen location.
+/// Save the temp recording to a user-chosen location. If `start`/`end` (seconds)
+/// are given, export only that trimmed range; otherwise copy the whole clip.
 #[tauri::command]
-pub async fn save_recording(app: AppHandle, path: String) -> Result<String, String> {
+pub async fn save_recording(
+    app: AppHandle,
+    path: String,
+    start: Option<f64>,
+    end: Option<f64>,
+) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
     let name = std::path::Path::new(&path)
         .file_name()
@@ -154,14 +160,19 @@ pub async fn save_recording(app: AppHandle, path: String) -> Result<String, Stri
         .set_file_name(&name)
         .add_filter("Video", &["mov", "mp4"])
         .blocking_save_file();
-    match dest {
-        Some(d) => {
-            let dp = d.to_string();
-            std::fs::copy(&path, &dp).map_err(|e| e.to_string())?;
-            Ok(dp)
+    let dp = match dest {
+        Some(d) => d.to_string(),
+        None => return Err("cancelled".into()),
+    };
+    match (start, end) {
+        (Some(s), Some(e)) if e > s => {
+            crate::services::recorder::export_trimmed(&path, &dp, s, e)?;
         }
-        None => Err("cancelled".into()),
+        _ => {
+            std::fs::copy(&path, &dp).map_err(|e| e.to_string())?;
+        }
     }
+    Ok(dp)
 }
 
 #[tauri::command]

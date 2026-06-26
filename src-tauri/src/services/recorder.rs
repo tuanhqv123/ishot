@@ -26,6 +26,29 @@ use objc::{class, msg_send, sel, sel_impl};
 extern "C" {
     static AVMediaTypeAudio: id;
     static AVCaptureSessionPresetHigh: id;
+    static AVAssetExportPresetHighestQuality: id;
+    static AVFileTypeQuickTimeMovie: id;
+}
+
+#[link(name = "CoreMedia", kind = "framework")]
+extern "C" {
+    fn CMTimeMakeWithSeconds(seconds: f64, preferred_timescale: i32) -> CMTime;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CMTime {
+    value: i64,
+    timescale: i32,
+    flags: u32,
+    epoch: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CMTimeRange {
+    start: CMTime,
+    duration: CMTime,
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -93,6 +116,58 @@ unsafe fn nsstring(s: &str) -> id {
 
 pub fn is_recording() -> bool {
     ACTIVE.lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
+/// Export `[start, end]` seconds of `src` to `dst` (trim) via AVAssetExportSession.
+/// Blocks until the async export completes. Used by Save when the user trimmed.
+pub fn export_trimmed(src: &str, dst: &str, start: f64, end: f64) -> Result<(), String> {
+    use block::ConcreteBlock;
+    let _ = std::fs::remove_file(dst); // export fails if the file exists
+    autoreleasepool(|| unsafe {
+        let src_s = nsstring(src);
+        let src_url: id = msg_send![class!(NSURL), fileURLWithPath: src_s];
+        let _: () = msg_send![src_s, release];
+        let asset: id = msg_send![class!(AVURLAsset), assetWithURL: src_url];
+        if asset == nil {
+            return Err("could not load recording".into());
+        }
+        let session: id = msg_send![class!(AVAssetExportSession), alloc];
+        let session: id = msg_send![
+            session,
+            initWithAsset: asset presetName: AVAssetExportPresetHighestQuality
+        ];
+        if session == nil {
+            return Err("export session init failed".into());
+        }
+        let dst_s = nsstring(dst);
+        let dst_url: id = msg_send![class!(NSURL), fileURLWithPath: dst_s];
+        let _: () = msg_send![dst_s, release];
+        let _: () = msg_send![session, setOutputURL: dst_url];
+        let _: () = msg_send![session, setOutputFileType: AVFileTypeQuickTimeMovie];
+        let range = CMTimeRange {
+            start: CMTimeMakeWithSeconds(start.max(0.0), 600),
+            duration: CMTimeMakeWithSeconds((end - start).max(0.1), 600),
+        };
+        let _: () = msg_send![session, setTimeRange: range];
+
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let completion = ConcreteBlock::new(move || {
+            let _ = tx.send(());
+        });
+        let completion = completion.copy();
+        let _: () =
+            msg_send![session, exportAsynchronouslyWithCompletionHandler: &*completion];
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(180));
+
+        // AVAssetExportSessionStatusCompleted = 3
+        let status: i64 = msg_send![session, status];
+        let _: () = msg_send![session, release];
+        if status == 3 {
+            Ok(())
+        } else {
+            Err(format!("export failed (status {})", status))
+        }
+    })
 }
 
 /// Build + start the capture session. Owned objects (session/output/delegate)

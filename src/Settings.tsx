@@ -355,7 +355,14 @@ export default function Settings() {
     else if (kind === "color")
       updateAppearance({ kind, value: /^#/.test(v) ? v : COLOR_PRESETS[0] });
     else if (kind === "wallpaper") selectWallpaper();
-    else updateAppearance({ kind: "image" });
+    else {
+      // Custom image → switch kind AND open the file picker right away (so it's
+      // not just a dead "Choose image…" button the user has to find).
+      updateAppearance({ kind: "image" });
+      if (!v || GRADIENT_PRESETS.some((g) => g.id === v) || /^#/.test(v)) {
+        pickCustomImage();
+      }
+    }
   };
 
   const app = settings.appearance;

@@ -38,6 +38,9 @@ export default function RecordingPreview() {
 						v.onseeked = () => res();
 						v.currentTime = Math.min(t, Math.max(0, dur - 0.05));
 					});
+					// Wait one paint so the decoded frame is actually available —
+					// drawing immediately after `seeked` often yields a black frame.
+					await new Promise((r) => requestAnimationFrame(() => r(null)));
 					const ar = v.videoHeight / v.videoWidth || 0.56;
 					canvas.width = 160;
 					canvas.height = Math.round(160 * ar);

@@ -198,7 +198,7 @@ pub fn open_camera_bubble(app: AppHandle) {
             }
             None => (200.0, 200.0),
         };
-        let _ = tauri::WebviewWindowBuilder::new(
+        let built = tauri::WebviewWindowBuilder::new(
             &app2,
             "camera_bubble",
             tauri::WebviewUrl::App("camera.html".into()),
@@ -212,6 +212,10 @@ pub fn open_camera_bubble(app: AppHandle) {
         .resizable(false)
         .visible(true)
         .build();
+        // Raise above the capture overlay so it's visible while setting up.
+        if let Ok(win) = built {
+            crate::raise_window_topmost(&win);
+        }
     });
 }
 

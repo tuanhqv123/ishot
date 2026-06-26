@@ -768,6 +768,28 @@ fn order_overlay_over_fullscreen(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Raise a window ABOVE the capture overlay (and over fullscreen apps) so it's
+/// visible while the overlay is up — used for the camera bubble during setup.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+pub(crate) fn raise_window_topmost(window: &tauri::WebviewWindow) {
+    if let Ok(ns_ptr) = window.ns_window() {
+        let ns_win = ns_ptr as id;
+        unsafe {
+            ns_win.setCollectionBehavior_(
+                NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
+                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
+            );
+            ns_win.setLevel_(overlay_window_level() + 2);
+            let _: () = msg_send![ns_win, orderFrontRegardless];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn raise_window_topmost(_window: &tauri::WebviewWindow) {}
+
 #[cfg(target_os = "macos")]
 fn has_screen_recording() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }

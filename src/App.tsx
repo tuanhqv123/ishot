@@ -745,8 +745,27 @@ function App() {
 		dragStartRef.current = null;
 	}, []);
 
+	// Record controls live in a Row-2 options bar under the toolbar (like the
+	// draw/blur tool options), opened by the Record (Video) button.
+	const [showRecordOpts, setShowRecordOpts] = useState(false);
+	const [recordSource, setRecordSource] = useState("selection");
+	const [recordMic, setRecordMic] = useState(false);
+	const [recordCamera, setRecordCamera] = useState(false);
+	// True only while transitioning into a recording, so cancelCapture (called
+	// to hide the overlay) knows NOT to close the camera bubble in that case.
+	const startingRecordingRef = useRef(false);
+
 	const cancelCapture = useCallback(async () => {
 		resetState();
+		// Reset record options; close the camera bubble UNLESS we're starting a
+		// recording (then the bubble must stay, to be captured).
+		setShowRecordOpts(false);
+		setRecordCamera(false);
+		if (startingRecordingRef.current) {
+			startingRecordingRef.current = false;
+		} else {
+			invoke("close_camera_bubble").catch(() => {});
+		}
 		// Pop the crosshair cursor we pushed when the overlay appeared
 		// (Rust side `push_overlay_cursor`). Safe to call when nothing is
 		// pushed — it no-ops.
@@ -1064,13 +1083,6 @@ function App() {
 		}
 	}, [renderFinalImage, cancelCapture]);
 
-	// Record controls live in a Row-2 options bar under the toolbar (like the
-	// draw/blur tool options), opened by the Record (Video) button.
-	const [showRecordOpts, setShowRecordOpts] = useState(false);
-	const [recordSource, setRecordSource] = useState("selection");
-	const [recordMic, setRecordMic] = useState(false);
-	const [recordCamera, setRecordCamera] = useState(false);
-
 	const toggleRecordCamera = useCallback(() => {
 		setRecordCamera((on) => {
 			const next = !on;
@@ -1100,6 +1112,8 @@ function App() {
 			source = "window";
 			window_id = Number(recordSource.split(":")[1]);
 		}
+		// Keep the camera bubble open through the overlay-hide for recording.
+		startingRecordingRef.current = true;
 		await cancelCapture();
 		try {
 			await invoke("start_recording", {

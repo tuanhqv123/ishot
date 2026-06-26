@@ -295,13 +295,14 @@ pub fn do_pause_toggle(app: &AppHandle) {
     if !RECORDING.load(Ordering::SeqCst) {
         return;
     }
-    if PAUSED.load(Ordering::SeqCst) {
-        crate::services::recorder::resume();
-        PAUSED.store(false, Ordering::SeqCst);
-    } else {
+    let now_paused = !PAUSED.load(Ordering::SeqCst);
+    if now_paused {
         crate::services::recorder::pause();
-        PAUSED.store(true, Ordering::SeqCst);
+    } else {
+        crate::services::recorder::resume();
     }
+    PAUSED.store(now_paused, Ordering::SeqCst);
+    crate::set_pause_tray_icon(app, now_paused);
     let _ = app.emit("recording-state", status());
 }
 

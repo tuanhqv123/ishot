@@ -865,6 +865,58 @@ fn make_status_icon(
     tauri::image::Image::new_owned(rgba, size, size)
 }
 
+// ⏸ two bars (template → tints to the menu bar colour).
+fn pause_icon() -> tauri::image::Image<'static> {
+    make_status_icon(|x, y| {
+        if (9..23).contains(&y) && ((11..=14).contains(&x) || (17..=20).contains(&x)) {
+            Some([255, 255, 255, 255])
+        } else {
+            None
+        }
+    })
+}
+
+// ▶ right-pointing triangle (resume).
+fn play_icon() -> tauri::image::Image<'static> {
+    make_status_icon(|x, y| {
+        let (x0, x1, cy, hmax) = (12.0f32, 21.0f32, 16.0f32, 7.0f32);
+        let xf = x as f32;
+        if (12..=21).contains(&x) {
+            let half = (x1 - xf) / (x1 - x0) * hmax;
+            if (y as f32 - cy).abs() <= half {
+                return Some([255, 255, 255, 255]);
+            }
+        }
+        None
+    })
+}
+
+// ■ red square (stop).
+fn stop_icon() -> tauri::image::Image<'static> {
+    make_status_icon(|x, y| {
+        if (10..22).contains(&y) && (10..22).contains(&x) {
+            Some([255, 59, 48, 255])
+        } else {
+            None
+        }
+    })
+}
+
+/// Swap the Pause button's icon when toggling pause/resume.
+fn set_pause_tray_icon(app: &tauri::AppHandle, paused: bool) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(tray) = app.tray_by_id("rec_pause") {
+            let _ = tray.set_icon(Some(if paused { play_icon() } else { pause_icon() }));
+            let _ = tray.set_tooltip(Some(if paused {
+                "Resume recording"
+            } else {
+                "Pause recording"
+            }));
+        }
+    });
+}
+
 /// Two menu-bar status items shown WHILE recording — a Pause/Resume button and a
 /// Stop button (direct click, no dropdown). Less intrusive than an on-screen bar.
 fn show_recording_tray(app: &tauri::AppHandle) {
@@ -874,25 +926,8 @@ fn show_recording_tray(app: &tauri::AppHandle) {
         if app.tray_by_id("rec_pause").is_some() {
             return;
         }
-        // ⏸ two bars (template → tints to the menu bar colour).
-        let pause_icon = make_status_icon(|x, y| {
-            if (9..23).contains(&y) && ((11..=14).contains(&x) || (17..=20).contains(&x)) {
-                Some([255, 255, 255, 255])
-            } else {
-                None
-            }
-        });
-        // ■ red square.
-        let stop_icon = make_status_icon(|x, y| {
-            if (10..22).contains(&y) && (10..22).contains(&x) {
-                Some([255, 59, 48, 255])
-            } else {
-                None
-            }
-        });
-
         let _ = TrayIconBuilder::with_id("rec_pause")
-            .icon(pause_icon)
+            .icon(pause_icon())
             .icon_as_template(true)
             .tooltip("Pause / Resume recording")
             .show_menu_on_left_click(false)
@@ -909,7 +944,7 @@ fn show_recording_tray(app: &tauri::AppHandle) {
             .build(&app);
 
         let _ = TrayIconBuilder::with_id("rec_stop")
-            .icon(stop_icon)
+            .icon(stop_icon())
             .tooltip("Stop recording")
             .show_menu_on_left_click(false)
             .on_tray_icon_event(|tray, event| {

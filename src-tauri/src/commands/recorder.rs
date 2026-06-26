@@ -285,7 +285,24 @@ pub fn start_recording(app: AppHandle, opts: RecordOptions) -> Result<(), String
     RECORDING.store(true, Ordering::SeqCst);
     PAUSED.store(false, Ordering::SeqCst);
     let _ = app.emit("recording-state", status());
+    // Menu-bar control: a red status item with Pause/Resume + Stop while recording.
+    crate::show_recording_tray(&app);
     Ok(())
+}
+
+/// Toggle pause/resume — used by the menu-bar recording status item.
+pub fn do_pause_toggle(app: &AppHandle) {
+    if !RECORDING.load(Ordering::SeqCst) {
+        return;
+    }
+    if PAUSED.load(Ordering::SeqCst) {
+        crate::services::recorder::resume();
+        PAUSED.store(false, Ordering::SeqCst);
+    } else {
+        crate::services::recorder::pause();
+        PAUSED.store(true, Ordering::SeqCst);
+    }
+    let _ = app.emit("recording-state", status());
 }
 
 #[tauri::command]
@@ -320,6 +337,7 @@ pub fn do_stop(app: &AppHandle) -> Option<String> {
     RECORDING.store(false, Ordering::SeqCst);
     PAUSED.store(false, Ordering::SeqCst);
     let _ = app.emit("recording-state", status());
+    crate::hide_recording_tray(app);
     if let Some(w) = app.get_webview_window("camera_bubble") {
         let _ = w.close();
     }

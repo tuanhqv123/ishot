@@ -80,6 +80,95 @@ pub fn open_record_bar(app: AppHandle) {
     crate::open_recorder_window(&app);
 }
 
+/// Percent-encode a path for a URL query value (RFC 3986 unreserved kept).
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Open the post-record preview window (video + timeline + Save/Discard).
+fn show_preview(app: &AppHandle, path: &str) {
+    let url = format!("recording-preview.html?path={}", url_encode(path));
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = app2.get_webview_window("recording_preview") {
+            let _ = w.close();
+        }
+        let monitor = app2
+            .cursor_position()
+            .ok()
+            .and_then(|p| app2.monitor_from_point(p.x, p.y).ok().flatten())
+            .or_else(|| app2.primary_monitor().ok().flatten());
+        let (w, h) = (760.0, 560.0);
+        let (x, y) = match monitor {
+            Some(m) => {
+                let s = m.scale_factor();
+                let mx = m.position().x as f64 / s;
+                let my = m.position().y as f64 / s;
+                let mw = m.size().width as f64 / s;
+                let mh = m.size().height as f64 / s;
+                (mx + (mw - w) / 2.0, my + (mh - h) / 2.0)
+            }
+            None => (200.0, 200.0),
+        };
+        let _ = tauri::WebviewWindowBuilder::new(
+            &app2,
+            "recording_preview",
+            tauri::WebviewUrl::App(url.into()),
+        )
+        .title("Recording")
+        .inner_size(w, h)
+        .position(x, y)
+        .decorations(false)
+        .resizable(true)
+        .visible(true)
+        .build();
+    });
+}
+
+#[tauri::command]
+pub fn open_recording_preview(app: AppHandle, path: String) {
+    show_preview(&app, &path);
+}
+
+/// Copy the temp recording to a user-chosen location.
+#[tauri::command]
+pub async fn save_recording(app: AppHandle, path: String) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("recording.mov")
+        .to_string();
+    let dest = app
+        .dialog()
+        .file()
+        .set_file_name(&name)
+        .add_filter("Video", &["mov", "mp4"])
+        .blocking_save_file();
+    match dest {
+        Some(d) => {
+            let dp = d.to_string();
+            std::fs::copy(&path, &dp).map_err(|e| e.to_string())?;
+            Ok(dp)
+        }
+        None => Err("cancelled".into()),
+    }
+}
+
+#[tauri::command]
+pub fn discard_recording(path: String) -> Result<(), String> {
+    std::fs::remove_file(&path).map_err(|e| e.to_string())
+}
+
 const CAM_SIZE: f64 = 180.0;
 
 /// Show the circular webcam bubble bottom-right of the active monitor. It's a
@@ -215,8 +304,14 @@ pub fn stop_recording(app: AppHandle) -> Result<Option<String>, String> {
     let _ = app.emit("recording-state", status());
     if let Some(ref p) = path {
         println!("[recorder] stopped, saved {}", p);
-        // Surface where it saved (preview+timeline window comes next).
-        crate::services::hud::show(&app, &format!("Recording saved → {}", p));
+        // The .mov finalizes asynchronously after stopRecording; wait briefly
+        // so the file is playable, then open the preview + timeline window.
+        let app2 = app.clone();
+        let p2 = p.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            show_preview(&app2, &p2);
+        });
     }
     Ok(path)
 }

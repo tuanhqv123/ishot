@@ -20,6 +20,10 @@ export default defineConfig(async () => ({
 				hud: path.resolve(__dirname, "hud.html"),
 				recording: path.resolve(__dirname, "recording.html"),
 				camera: path.resolve(__dirname, "camera.html"),
+				"recording-preview": path.resolve(
+					__dirname,
+					"recording-preview.html",
+				),
 				"clipboard-history": path.resolve(__dirname, "clipboard-history.html"),
 				settings: path.resolve(__dirname, "settings.html"),
 			},

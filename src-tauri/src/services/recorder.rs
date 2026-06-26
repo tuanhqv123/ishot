@@ -15,6 +15,8 @@ use std::ffi::CString;
 use std::sync::Mutex;
 
 use cocoa::base::{id, nil};
+use cocoa::foundation::{NSPoint, NSRect, NSSize};
+use core_graphics::display::CGDisplay;
 use objc::declare::ClassDecl;
 use objc::rc::autoreleasepool;
 use objc::runtime::{Class, Object, Sel, BOOL, NO};
@@ -97,7 +99,7 @@ pub fn is_recording() -> bool {
 /// outlive the autorelease pool; autoreleased temporaries (URL, device, input)
 /// are drained when the pool exits — the session has already retained the
 /// inputs/output it needs.
-unsafe fn build_session(mic: bool) -> Result<Active, String> {
+unsafe fn build_session(mic: bool, crop: Option<(f64, f64, f64, f64)>) -> Result<Active, String> {
     autoreleasepool(|| {
         let session: id = msg_send![class!(AVCaptureSession), alloc];
         let session: id = msg_send![session, init];
@@ -113,6 +115,17 @@ unsafe fn build_session(mic: bool) -> Result<Active, String> {
             let _: () = msg_send![session, release];
             return Err("AVCaptureScreenInput init failed".into());
         }
+
+        // Window source → crop to the window's rectangle so we don't record the
+        // whole screen. Window bounds are top-left origin (CGWindow space);
+        // AVCaptureScreenInput.cropRect is bottom-left origin, so flip Y by the
+        // main display's height. (Per-window occlusion would need ScreenCaptureKit.)
+        if let Some((wx, wy, ww, wh)) = crop {
+            let dh = CGDisplay::main().bounds().size.height;
+            let rect = NSRect::new(NSPoint::new(wx, dh - (wy + wh)), NSSize::new(ww, wh));
+            let _: () = msg_send![screen, setCropRect: rect];
+        }
+
         let can_add: BOOL = msg_send![session, canAddInput: screen];
         if can_add == NO {
             let _: () = msg_send![screen, release];
@@ -173,12 +186,12 @@ unsafe fn build_session(mic: bool) -> Result<Active, String> {
 
 /// Start recording the main display to a temp `.mov`. `mic` adds the default
 /// audio device. Returns the output path. Errors if already recording.
-pub fn start(mic: bool) -> Result<String, String> {
+pub fn start(mic: bool, crop: Option<(f64, f64, f64, f64)>) -> Result<String, String> {
     let mut guard = ACTIVE.lock().map_err(|_| "lock poisoned")?;
     if guard.is_some() {
         return Err("already recording".into());
     }
-    let active = unsafe { build_session(mic) }?;
+    let active = unsafe { build_session(mic, crop) }?;
     let path = active.path.clone();
     *guard = Some(active);
     Ok(path)

@@ -53,8 +53,8 @@ impl Default for AppearanceConfig {
             enabled: false,
             kind: "gradient".to_string(),
             value: "".to_string(),
-            padding: 48,
-            radius: 12,
+            padding: 64,
+            radius: 16,
             shadow: true,
         }
     }

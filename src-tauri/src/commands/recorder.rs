@@ -71,9 +71,18 @@ pub fn start_recording(app: AppHandle, opts: RecordOptions) -> Result<(), String
         "[recorder] start source={} window={:?} monitor={:?} mic={} camera={}",
         opts.source, opts.window_id, opts.monitor, opts.mic, opts.camera
     );
-    // Native AVFoundation capture (main display). Window-only + camera bubble
-    // come next; for now we record the screen (+ mic) to a .mov.
-    let path = crate::services::recorder::start(opts.mic)?;
+    // Window source → crop to that window's bounds; screen source → full display.
+    let crop = if opts.source == "window" {
+        opts.window_id.and_then(|id| {
+            snapshot_windows()
+                .into_iter()
+                .find(|w| w.id == id)
+                .map(|w| (w.x, w.y, w.w, w.h))
+        })
+    } else {
+        None
+    };
+    let path = crate::services::recorder::start(opts.mic, crop)?;
     println!("[recorder] recording to {}", path);
     RECORDING.store(true, Ordering::SeqCst);
     PAUSED.store(false, Ordering::SeqCst);

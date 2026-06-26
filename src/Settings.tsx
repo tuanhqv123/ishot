@@ -39,10 +39,18 @@ const DEFAULT_APPEARANCE: AppearanceConfig = {
   enabled: false,
   kind: "gradient",
   value: "",
-  padding: 48,
-  radius: 12,
+  padding: 64,
+  radius: 16,
   shadow: true,
 };
+
+// Nearest preset value, so the radius/padding dropdown always shows a word label
+// (Small/Medium/…) instead of a bare number, even for legacy saved values.
+function nearest(v: number, opts: { value: string }[]): string {
+  return opts.reduce((best, o) =>
+    Math.abs(+o.value - v) < Math.abs(+best.value - v) ? o : best,
+  ).value;
+}
 
 // Gradient presets come from the SHARED module (src/gradients.ts) so the picker,
 // the live preview here, and the overlay's renderFinalImage all use identical
@@ -653,7 +661,7 @@ export default function Settings() {
             <div className="st-row">
               <div className="st-label">Corner radius</div>
               <Dropdown
-                value={String(app.radius)}
+                value={nearest(app.radius, RADIUS_OPTIONS)}
                 onChange={(v) => updateAppearance({ radius: parseInt(v, 10) })}
                 options={RADIUS_OPTIONS}
               />
@@ -662,7 +670,7 @@ export default function Settings() {
             <div className="st-row">
               <div className="st-label">Padding</div>
               <Dropdown
-                value={String(app.padding)}
+                value={nearest(app.padding, PADDING_OPTIONS)}
                 onChange={(v) => updateAppearance({ padding: parseInt(v, 10) })}
                 options={PADDING_OPTIONS}
               />

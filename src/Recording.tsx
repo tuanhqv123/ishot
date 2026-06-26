@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import {
 	Mic,
 	MicOff,
@@ -75,24 +75,15 @@ export default function Recording() {
 		const win = getCurrentWindow();
 		try {
 			const scale = await win.scaleFactor();
-			const pos = await win.outerPosition();
-			const extra = Math.round(MENU_EXTRA * scale);
+			const phys = await win.outerPosition();
+			const lx = phys.x / scale;
+			const ly = phys.y / scale;
 			if (open) {
-				await win.setPosition(new PhysicalPosition(pos.x, pos.y - extra));
-				await win.setSize(
-					new PhysicalSize(
-						Math.round(BAR_W * scale),
-						Math.round((BAR_H + MENU_EXTRA) * scale),
-					),
-				);
+				await win.setSize(new LogicalSize(BAR_W, BAR_H + MENU_EXTRA));
+				await win.setPosition(new LogicalPosition(lx, ly - MENU_EXTRA));
 			} else {
-				await win.setSize(
-					new PhysicalSize(
-						Math.round(BAR_W * scale),
-						Math.round(BAR_H * scale),
-					),
-				);
-				await win.setPosition(new PhysicalPosition(pos.x, pos.y + extra));
+				await win.setSize(new LogicalSize(BAR_W, BAR_H));
+				await win.setPosition(new LogicalPosition(lx, ly + MENU_EXTRA));
 			}
 		} catch (e) {
 			console.error("resize record bar", e);

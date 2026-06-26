@@ -19,6 +19,7 @@ export default defineConfig(async () => ({
 				"scroll-border": path.resolve(__dirname, "scroll-border.html"),
 				hud: path.resolve(__dirname, "hud.html"),
 				recording: path.resolve(__dirname, "recording.html"),
+				camera: path.resolve(__dirname, "camera.html"),
 				"clipboard-history": path.resolve(__dirname, "clipboard-history.html"),
 				settings: path.resolve(__dirname, "settings.html"),
 			},

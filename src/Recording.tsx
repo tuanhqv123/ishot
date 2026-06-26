@@ -106,10 +106,19 @@ export default function Recording() {
 	const stop = useCallback(async () => {
 		try {
 			await invoke<string | null>("stop_recording");
+			invoke("close_camera_bubble").catch(() => {});
 			// TODO(preview): open the preview+timeline window with the returned path.
 		} catch (e) {
 			console.error("stop_recording", e);
 		}
+	}, []);
+
+	const toggleCamera = useCallback(() => {
+		setCamera((on) => {
+			const next = !on;
+			invoke(next ? "open_camera_bubble" : "close_camera_bubble").catch(() => {});
+			return next;
+		});
 	}, []);
 
 	const togglePause = useCallback(async () => {
@@ -173,7 +182,7 @@ export default function Recording() {
 							type="button"
 							title={camera ? "Camera on" : "Camera off"}
 							className={toggleCls(camera)}
-							onClick={() => setCamera((v) => !v)}
+							onClick={toggleCamera}
 						>
 							{camera ? <Video size={17} /> : <VideoOff size={17} />}
 						</button>

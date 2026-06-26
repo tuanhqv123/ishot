@@ -686,6 +686,8 @@ fn main() {
             commands::recorder::recording_status,
             commands::recorder::set_recorder_expanded,
             commands::recorder::open_record_bar,
+            commands::recorder::open_camera_bubble,
+            commands::recorder::close_camera_bubble,
             commands::recorder::start_recording,
             commands::recorder::pause_recording,
             commands::recorder::resume_recording,

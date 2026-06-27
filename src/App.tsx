@@ -115,6 +115,8 @@ interface Annotation {
 	/// curve it (quadratic Bézier). Absent = straight.
 	cx?: number;
 	cy?: number;
+	/// Arrow render style: 1 = line, 2 = brush (perfect-freehand). Default 2.
+	arrowStyle?: 1 | 2;
 	path?: { x: number; y: number }[];
 	blurStrength?: number;
 	blurMode?: "rect" | "draw";
@@ -224,9 +226,8 @@ function paintShape(
 	else if (spec.kind === "line")
 		shaft(spec.x1, spec.y1, spec.x2, spec.y2, spec.cx, spec.cy);
 	else if (spec.kind === "arrow") {
+		// Style 1 (line): shaft to the tip + an open V head, all uniform stroke.
 		shaft(spec.x1, spec.y1, spec.x2, spec.y2, spec.cx, spec.cy);
-		// Head points along the tangent at the tip: from the control point (if
-		// curved) or the start, toward the end.
 		const fromX = spec.cx ?? spec.x1;
 		const fromY = spec.cy ?? spec.y1;
 		const angle = Math.atan2(spec.y2 - fromY, spec.x2 - fromX);
@@ -245,6 +246,116 @@ function paintShape(
 			opts,
 		);
 	}
+}
+
+// Style 2 (brush): a tapered perfect-freehand shaft (thin tail → thick head)
+// with a SOLID, rounded-corner triangle head. Ignores sloppiness — one look.
+// Brush thickness per stroke-weight level [2,4,8,14]. Hand-tuned (not linear)
+// so the 4 levels stay distinct but the top two don't balloon.
+function brushArrowSize(w: number): number {
+	switch (w) {
+		case 2:
+			return 7;
+		case 4:
+			return 10;
+		case 8:
+			return 14;
+		case 14:
+			return 19;
+		default:
+			return Math.max(7, w * 1.3);
+	}
+}
+
+function drawBrushArrow(
+	ctx: CanvasRenderingContext2D,
+	x1: number,
+	y1: number,
+	x2: number,
+	y2: number,
+	cx: number | undefined,
+	cy: number | undefined,
+	color: string,
+	size: number,
+) {
+	const curved = cx !== undefined && cy !== undefined;
+	const headLen = size * 2.6;
+	const baseHalf = size * 1.35;
+	const round = size * 0.7;
+	// Dense sampling + high streamline keep the bent shaft visibly smooth (no
+	// facets/cracks at tight curves).
+	const N = 28;
+	const pts: number[][] = [];
+	const bez = (t: number, p0: number, p1: number, p2: number) => {
+		const mt = 1 - t;
+		return mt * mt * p0 + 2 * mt * t * p1 + t * t * p2;
+	};
+	// Head base point (bcx,bcy) and head orientation (ha) must sit exactly where
+	// the shaft ends so the solid head never detaches — critical for bent arrows.
+	let bcx: number;
+	let bcy: number;
+	let ha: number;
+	if (curved) {
+		// Head base a head-length short of the tip, measured ALONG the curve, so the
+		// head sits on the curve (not on the straight chord) when bent.
+		const distCT = Math.hypot(x2 - cx!, y2 - cy!) || 1;
+		const tBase = Math.min(0.95, Math.max(0.05, 1 - headLen / (2 * distCT)));
+		bcx = bez(tBase, x1, cx!, x2);
+		bcy = bez(tBase, y1, cy!, y2);
+		ha = Math.atan2(y2 - bcy, x2 - bcx);
+		// Run the shaft a little PAST the head base so the head tucks over it — no
+		// seam/crack at the junction.
+		const tEnd = Math.min(0.99, tBase + (1 - tBase) * 0.5);
+		for (let i = 0; i <= N; i++) {
+			const t = (i / N) * tEnd;
+			pts.push([
+				bez(t, x1, cx!, x2),
+				bez(t, y1, cy!, y2),
+				0.18 + 0.82 * (i / N),
+			]);
+		}
+	} else {
+		const a = Math.atan2(y2 - y1, x2 - x1);
+		bcx = x2 - headLen * Math.cos(a);
+		bcy = y2 - headLen * Math.sin(a);
+		ha = a;
+		const ex = bcx + (x2 - bcx) * 0.5; // overlap under the head
+		const ey = bcy + (y2 - bcy) * 0.5;
+		for (let i = 0; i <= N; i++) {
+			const t = i / N;
+			pts.push([x1 + (ex - x1) * t, y1 + (ey - y1) * t, 0.18 + 0.82 * t]);
+		}
+	}
+	const outline = getStroke(pts, {
+		size,
+		thinning: 0.7,
+		smoothing: 0.72,
+		streamline: 0.62,
+		simulatePressure: false,
+		last: true,
+	});
+	ctx.fillStyle = color;
+	if (outline.length) {
+		ctx.beginPath();
+		outline.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+		ctx.closePath();
+		ctx.fill();
+	}
+	// Solid head with rounded corners (fill + round-join stroke, same colour).
+	const nx = -Math.sin(ha);
+	const ny = Math.cos(ha);
+	ctx.beginPath();
+	ctx.moveTo(x2, y2);
+	ctx.lineTo(bcx + nx * baseHalf, bcy + ny * baseHalf);
+	ctx.lineTo(bcx - nx * baseHalf, bcy - ny * baseHalf);
+	ctx.closePath();
+	ctx.fillStyle = color;
+	ctx.strokeStyle = color;
+	ctx.lineWidth = round;
+	ctx.lineJoin = "round";
+	ctx.lineCap = "round";
+	ctx.fill();
+	ctx.stroke();
 }
 
 // Render a freehand stroke as a smooth, naturally-tapered filled path using
@@ -413,6 +524,15 @@ function App() {
 		startY: number;
 		orig: Annotation;
 	} | null>(null);
+	// Two-click placement for arrow/line: after the 1st click (or a click that
+	// wasn't a drag) we hold the start point here; the next click finishes it.
+	const arrowAnchorRef = useRef<{ x: number; y: number } | null>(null);
+	// Whether something was selected at mousedown — a no-drag click that only
+	// deselected must NOT also start placing a new arrow.
+	const wasSelectedRef = useRef(false);
+	// Latest redrawAnnotations, callable from event handlers (e.g. Esc) without
+	// re-subscribing them or hitting TDZ on the callback defined further down.
+	const redrawRef = useRef<() => void>(() => {});
 	const [blurStrength, setBlurStrength] = useState(10);
 	const [tempBlur, setTempBlur] = useState<Region | null>(null);
 	const [fontSize, setFontSize] = useState(
@@ -423,8 +543,15 @@ function App() {
 	const [strokeWidth, setStrokeWidth] = useState(
 		() => Number(localStorage.getItem("ishot-stroke-w")) || 4,
 	);
-	const [sloppiness, setSloppiness] = useState<Sloppiness>(
+	// Sloppiness is no longer user-adjustable (all shapes render formal/clean);
+	// kept only as the value stored on new annotations for back-compat.
+	const [sloppiness] = useState<Sloppiness>(
 		() => (Number(localStorage.getItem("ishot-sloppiness")) as Sloppiness) || 0,
+	);
+	// Arrow has its own 2 styles (instead of sloppiness): 1 = line (smooth V),
+	// 2 = brush (tapered perfect-freehand shaft + solid rounded head).
+	const [arrowStyle, setArrowStyle] = useState<1 | 2>(
+		() => ((Number(localStorage.getItem("ishot-arrow-style")) as 1 | 2) || 2),
 	);
 	// Last shape picked in the options row — the row-1 "shapes" button
 	// re-activates this one so clicking it always drops you into a usable tool.
@@ -1717,6 +1844,10 @@ function App() {
 			closeTranslatePanel();
 			exitScrollReady();
 			setShowRecordOpts(false);
+			// Drop any in-progress two-click arrow placement.
+			arrowAnchorRef.current = null;
+			setIsDrawing(false);
+			setDrawStart(null);
 			setTool(newTool);
 			setSelectedAnnotation(null);
 			if (newTool === "text" && textBlocks.length === 0 && !ocrLoading)
@@ -2083,6 +2214,14 @@ function App() {
 					}
 					return;
 				}
+				// Mid two-click arrow placement → cancel just the placement.
+				if (arrowAnchorRef.current) {
+					arrowAnchorRef.current = null;
+					setIsDrawing(false);
+					setDrawStart(null);
+					redrawRef.current();
+					return;
+				}
 				cancelCapture();
 			} else if ((e.metaKey || e.ctrlKey) && e.key === "c" && selectedText) {
 				e.preventDefault();
@@ -2174,12 +2313,12 @@ function App() {
 			const lw = isSelected ? (ann.strokeWidth || 2) + 1 : ann.strokeWidth || 2;
 			// Stable `seed` (per-annotation) keeps the hand-drawn jitter identical
 			// across every redraw instead of re-randomizing.
-			const s = ann.sloppiness ?? 0;
 			const style = { color, lw, seed: ann.seed || ann.id || 1 };
 
 			if (ann.type === "rect" && ann.w !== undefined) {
 				// Normalize so negative w/h (drawn right-to-left) render cleanly.
-				paintShape(rc, s, {
+				// Rect/oval render clean (no sloppiness option).
+				paintShape(rc, 0, {
 					kind: "rect",
 					x: Math.min(ann.x, ann.x + ann.w),
 					y: Math.min(ann.y, ann.y + ann.h!),
@@ -2187,7 +2326,7 @@ function App() {
 					h: Math.abs(ann.h!),
 				}, style);
 			} else if (ann.type === "oval" && ann.w !== undefined) {
-				paintShape(rc, s, {
+				paintShape(rc, 0, {
 					kind: "oval",
 					cx: ann.x + ann.w / 2,
 					cy: ann.y + ann.h! / 2,
@@ -2195,19 +2334,36 @@ function App() {
 					h: Math.abs(ann.h!),
 				}, style);
 			} else if (ann.type === "arrow" && ann.ex !== undefined) {
-				paintShape(rc, s, {
-					kind: "arrow",
-					x1: ann.x,
-					y1: ann.y,
-					x2: ann.ex,
-					y2: ann.ey!,
-					headLen: Math.max(18, lw * 5.5),
-					spread: Math.PI / 7,
-					cx: ann.cx,
-					cy: ann.cy,
-				}, style);
+				if ((ann.arrowStyle ?? 2) === 2) {
+					// Style 2 — brush (ignores sloppiness).
+					drawBrushArrow(
+						ctx,
+						ann.x,
+						ann.y,
+						ann.ex,
+						ann.ey!,
+						ann.cx,
+						ann.cy,
+						color,
+						brushArrowSize(ann.strokeWidth || 4),
+					);
+				} else {
+					// Style 1 — line V (fixed at formal/clean).
+					paintShape(rc, 0, {
+						kind: "arrow",
+						x1: ann.x,
+						y1: ann.y,
+						x2: ann.ex,
+						y2: ann.ey!,
+						headLen: Math.max(18, lw * 5.5),
+						spread: Math.PI / 7,
+						cx: ann.cx,
+						cy: ann.cy,
+					}, style);
+				}
 			} else if (ann.type === "line" && ann.ex !== undefined) {
-				paintShape(rc, s, {
+				// Line renders clean (no sloppiness option).
+				paintShape(rc, 0, {
 					kind: "line",
 					x1: ann.x,
 					y1: ann.y,
@@ -2226,6 +2382,10 @@ function App() {
 	useEffect(() => {
 		if (stage === "editing") redrawAnnotations();
 	}, [annotations, stage, redrawAnnotations, selectedAnnotation]);
+
+	useEffect(() => {
+		redrawRef.current = redrawAnnotations;
+	}, [redrawAnnotations]);
 
 	// Mouse handlers — selection has TWO modes:
 	//   - "auto": hover-detect, snaps to whatever OS window is under cursor.
@@ -2470,20 +2630,67 @@ function App() {
 	};
 
 	// Canvas handlers
+	// Commit an arrow/line annotation from start→end (shared by drag-release and
+	// two-click finishing).
+	const commitArrowLine = (
+		sx: number,
+		sy: number,
+		ex: number,
+		ey: number,
+	) => {
+		const id = ++annotationId;
+		const base = {
+			id,
+			x: sx,
+			y: sy,
+			ex,
+			ey,
+			color: strokeColor,
+			strokeWidth,
+			sloppiness,
+			seed: id,
+		};
+		if (tool === "arrow")
+			setAnnotations((prev) => [
+				...prev,
+				{ ...base, type: "arrow", arrowStyle },
+			]);
+		else
+			setAnnotations((prev) => [...prev, { ...base, type: "line" }]);
+	};
+
 	const handleCanvasMouseDown = (e: React.MouseEvent) => {
 		if (stage !== "editing" || !selection) return;
 		const rect = e.currentTarget.getBoundingClientRect();
 		const x = e.clientX - rect.left,
 			y = e.clientY - rect.top;
 
-		// Clicking directly on an existing annotation selects it AND begins a
-		// click-hold drag to move it — even while a drawing tool is active. This
-		// keeps the tool selected for continuous drawing (below) while allowing
-		// "click to select / drag to move".
+		// Two-click placement: if an arrow/line start is already anchored, this
+		// click is the FINISH — commit and reset (runs before hit-testing so it
+		// fires anywhere on the canvas).
+		if (arrowAnchorRef.current && (tool === "arrow" || tool === "line")) {
+			const a = arrowAnchorRef.current;
+			const p = constrainPoint(a.x, a.y, x, y, tool);
+			commitArrowLine(a.x, a.y, p.x, p.y);
+			arrowAnchorRef.current = null;
+			setIsDrawing(false);
+			setDrawStart(null);
+			return;
+		}
+
+		// Two-step interaction so selecting never conflicts with bending a handle:
+		//   1st click on a shape  → SELECT it (reveals the handles), no move.
+		//   click again + drag     → move the whole block.
+		//   (handle dots sit on top and do the bend; click outside deselects.)
 		for (let i = annotations.length - 1; i >= 0; i--) {
 			if (isPointInAnnotation(annotations[i], x, y)) {
-				setSelectedAnnotation(annotations[i].id);
-				annDragRef.current = { startX: x, startY: y, orig: annotations[i] };
+				if (annotations[i].id === selectedAnnotation) {
+					// Already selected → drag the body to move it.
+					annDragRef.current = { startX: x, startY: y, orig: annotations[i] };
+				} else {
+					// First click only selects → no accidental move/bend conflict.
+					setSelectedAnnotation(annotations[i].id);
+				}
 				return;
 			}
 		}
@@ -2494,6 +2701,9 @@ function App() {
 			return;
 		}
 
+		// Remember if this click deselected a block — a no-drag click that only
+		// deselects must NOT also begin placing an arrow (checked on mouseup).
+		wasSelectedRef.current = selectedAnnotation !== null;
 		setSelectedAnnotation(null);
 		setIsDrawing(true);
 		setDrawStart({ x, y });
@@ -2625,7 +2835,7 @@ function App() {
 		};
 
 		if (tool === "rect")
-			paintShape(rc, sloppiness, {
+			paintShape(rc, 0, {
 				kind: "rect",
 				x: Math.min(drawStart.x, x),
 				y: Math.min(drawStart.y, y),
@@ -2633,7 +2843,7 @@ function App() {
 				h: Math.abs(y - drawStart.y),
 			}, style);
 		else if (tool === "oval") {
-			paintShape(rc, sloppiness, {
+			paintShape(rc, 0, {
 				kind: "oval",
 				cx: (drawStart.x + x) / 2,
 				cy: (drawStart.y + y) / 2,
@@ -2641,17 +2851,31 @@ function App() {
 				h: Math.abs(y - drawStart.y),
 			}, style);
 		} else if (tool === "arrow") {
-			paintShape(rc, sloppiness, {
-				kind: "arrow",
-				x1: drawStart.x,
-				y1: drawStart.y,
-				x2: x,
-				y2: y,
-				headLen: Math.max(18, strokeWidth * 5.5),
-				spread: Math.PI / 7,
-			}, style);
+			if (arrowStyle === 2) {
+				drawBrushArrow(
+					ctx,
+					drawStart.x,
+					drawStart.y,
+					x,
+					y,
+					undefined,
+					undefined,
+					strokeColor,
+					brushArrowSize(strokeWidth),
+				);
+			} else {
+				paintShape(rc, 0, {
+					kind: "arrow",
+					x1: drawStart.x,
+					y1: drawStart.y,
+					x2: x,
+					y2: y,
+					headLen: Math.max(18, strokeWidth * 5.5),
+					spread: Math.PI / 7,
+				}, style);
+			}
 		} else if (tool === "line") {
-			paintShape(rc, sloppiness, {
+			paintShape(rc, 0, {
 				kind: "line",
 				x1: drawStart.x,
 				y1: drawStart.y,
@@ -2674,9 +2898,36 @@ function App() {
 		const rawX = e.clientX - rect.left,
 			rawY = e.clientY - rect.top;
 		const { x, y } = constrainPoint(drawStart.x, drawStart.y, rawX, rawY, tool);
+		// Below this, a press is a "click" not a drag.
+		const DRAG_MIN = 6;
+		const dist = Math.hypot(rawX - drawStart.x, rawY - drawStart.y);
+
+		// Arrow/line: support BOTH drag-to-draw AND click-click placement.
+		if (tool === "arrow" || tool === "line") {
+			if (dist >= DRAG_MIN) {
+				// Dragged out → commit right away.
+				commitArrowLine(drawStart.x, drawStart.y, x, y);
+				arrowAnchorRef.current = null;
+			} else if (!wasSelectedRef.current) {
+				// A click that did NOT just deselect a block → anchor the start;
+				// the next click finishes. Keep isDrawing/drawStart so the arrow
+				// previews following the cursor.
+				arrowAnchorRef.current = { x: drawStart.x, y: drawStart.y };
+				wasSelectedRef.current = false;
+				return;
+			}
+			// else: the click only deselected a block → draw nothing.
+			wasSelectedRef.current = false;
+			setIsDrawing(false);
+			setDrawStart(null);
+			setCurrentPath([]);
+			setTempBlur(null);
+			return;
+		}
+
 		const id = ++annotationId;
 
-		if (tool === "rect")
+		if (tool === "rect" && dist >= DRAG_MIN)
 			setAnnotations((prev) => [
 				...prev,
 				{
@@ -2692,7 +2943,7 @@ function App() {
 					seed: id,
 				},
 			]);
-		else if (tool === "oval")
+		else if (tool === "oval" && dist >= DRAG_MIN)
 			setAnnotations((prev) => [
 				...prev,
 				{
@@ -2702,38 +2953,6 @@ function App() {
 					y: drawStart.y,
 					w: x - drawStart.x,
 					h: y - drawStart.y,
-					color: strokeColor,
-					strokeWidth,
-					sloppiness,
-					seed: id,
-				},
-			]);
-		else if (tool === "arrow")
-			setAnnotations((prev) => [
-				...prev,
-				{
-					id,
-					type: "arrow",
-					x: drawStart.x,
-					y: drawStart.y,
-					ex: x,
-					ey: y,
-					color: strokeColor,
-					strokeWidth,
-					sloppiness,
-					seed: id,
-				},
-			]);
-		else if (tool === "line")
-			setAnnotations((prev) => [
-				...prev,
-				{
-					id,
-					type: "line",
-					x: drawStart.x,
-					y: drawStart.y,
-					ex: x,
-					ey: y,
 					color: strokeColor,
 					strokeWidth,
 					sloppiness,
@@ -2810,6 +3029,15 @@ function App() {
 		selectedAnnotation !== null
 			? annotations.find(
 					(a) => a.id === selectedAnnotation && a.type === "blur",
+				)
+			: null;
+
+	// A selected arrow drives the arrow-style picker so you can switch its style
+	// after the fact (the picker reflects + edits the selected arrow).
+	const selectedArrowAnn =
+		selectedAnnotation !== null
+			? annotations.find(
+					(a) => a.id === selectedAnnotation && a.type === "arrow",
 				)
 			: null;
 
@@ -3573,6 +3801,7 @@ function App() {
 								tool === "textbox" ||
 								tool === "blur" ||
 								!!selectedBlurAnn ||
+								!!selectedArrowAnn ||
 								showRecordOpts;
 							// row1: 32px buttons + 2×6px padding = 44. row2: 28px controls
 							// + 2×6px padding = 40. Keep in sync with --ctrl/--pad tokens.
@@ -3761,7 +3990,7 @@ function App() {
 										>
 											{/* Shape row: the shapes themselves as individual buttons,
 											    then stroke weight → sloppiness → color. */}
-											{isShapeTool && (
+											{(isShapeTool || selectedArrowAnn) && (
 												<>
 													{(
 														[
@@ -3811,13 +4040,33 @@ function App() {
 															/>
 														)}
 													/>
-													<SloppinessPicker
-														value={sloppiness}
-														onChange={(s) => {
-															setSloppiness(s);
-															localStorage.setItem("ishot-sloppiness", String(s));
-														}}
-													/>
+													{/* Arrow → 2-style picker (also edits a selected
+													    arrow). No sloppiness option for any tool. */}
+													{tool === "arrow" || selectedArrowAnn ? (
+														<ArrowStylePicker
+															value={
+																selectedArrowAnn
+																	? (selectedArrowAnn.arrowStyle ?? 2)
+																	: arrowStyle
+															}
+															onChange={(s) => {
+																setArrowStyle(s);
+																localStorage.setItem(
+																	"ishot-arrow-style",
+																	String(s),
+																);
+																if (selectedArrowAnn) {
+																	setAnnotations((prev) =>
+																		prev.map((a) =>
+																			a.id === selectedArrowAnn.id
+																				? { ...a, arrowStyle: s }
+																				: a,
+																			),
+																	);
+																}
+															}}
+														/>
+													) : null}
 													<div
 														style={{
 															width: 1,
@@ -4039,6 +4288,7 @@ function App() {
 								tool === "textbox" ||
 								tool === "blur" ||
 								!!selectedBlurAnn ||
+								!!selectedArrowAnn ||
 								showRecordOpts;
 							const row1H = 44,
 								row2H = 40,
@@ -4780,78 +5030,62 @@ function ToolIcon({ icon: Icon, box = 18 }: { icon: LucideIcon; box?: number }) 
 	);
 }
 
-/**
- * Sloppiness level icon, drawn by rough.js ITSELF: a short stroke rendered with
- * that level's exact roughness/bowing (same `roughFor` the real shapes use), so
- * each icon is an authentic preview of how that level looks — Formal is dead
- * straight, Artist is visibly sketchy. Rendered to a DPR-scaled canvas so
- * it's crisp on Retina. Fixed seed = stable icon.
- */
-function RoughLevelIcon({
-	level,
-	active,
-}: {
-	level: Sloppiness;
-	active: boolean;
-}) {
-	const ref = useRef<HTMLCanvasElement>(null);
-	useEffect(() => {
-		const c = ref.current;
-		if (!c) return;
-		const W = 26;
-		const H = 16;
-		const dpr = window.devicePixelRatio || 1;
-		c.width = W * dpr;
-		c.height = H * dpr;
-		const ctx = c.getContext("2d");
-		if (!ctx) return;
-		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-		ctx.clearRect(0, 0, W, H);
-		// A flowing up-down-up signature stroke (smooth spline through the
-		// points). At a 26px icon the REAL roughness values are too subtle to
-		// tell apart, so the icon EXAGGERATES the contrast: Formal = clean,
-		// Smooth = clearly wavy, Artist = scribbly. It's a label, not a literal
-		// preview — the actual shapes use roughFor()'s gentler numbers.
-		const ICON: Record<Sloppiness, { r: number; b: number; multi: boolean }> = {
-			0: { r: 0, b: 0, multi: false },
-			1: { r: 1.3, b: 1.1, multi: false },
-			2: { r: 2.4, b: 1.4, multi: false },
-		};
-		const cfg = ICON[level];
-		const pts: [number, number][] = [
-			[3, 11],
-			[8, 5],
-			[13, 11],
-			[18, 5],
-			[23, 10],
-		];
-		rough.canvas(c).curve(pts, {
-			stroke: active ? "#ffffff" : "rgba(0,0,0,0.85)",
-			strokeWidth: 2,
-			roughness: cfg.r,
-			bowing: cfg.b,
-			seed: 7,
-			disableMultiStroke: !cfg.multi,
-		});
-	}, [level, active]);
-	return <canvas ref={ref} style={{ width: 26, height: 16, display: "block" }} />;
+// Mini preview icons for the two arrow styles.
+function ArrowStyleIcon({ style, on }: { style: 1 | 2; on: boolean }) {
+	// currentColor (not fill="var(--text)") — CSS vars don't resolve inside SVG
+	// presentation attributes, so set the color via style and use currentColor.
+	const iconStyle = { color: on ? "#fff" : "var(--text)" } as const;
+	if (style === 1) {
+		// Line arrow with an open V head.
+		return (
+			<svg
+				width="16"
+				height="16"
+				viewBox="0 0 20 20"
+				fill="none"
+				style={iconStyle}
+			>
+				<path
+					d="M4 14 L15 6 M15 6 L10.5 6.2 M15 6 L14.4 10.4"
+					stroke="currentColor"
+					strokeWidth="1.7"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				/>
+			</svg>
+		);
+	}
+	// Brush arrow: clearly fat, tapered shaft (thin tail → thick) + solid head.
+	return (
+		<svg
+			width="16"
+			height="16"
+			viewBox="0 0 20 20"
+			fill="none"
+			style={iconStyle}
+		>
+			<path d="M3 17 L12.96 9.94 L10.78 7.6 Z" fill="currentColor" />
+			<path
+				d="M17 4 L14.9 10.6 L10.3 5.6 Z"
+				fill="currentColor"
+				stroke="currentColor"
+				strokeWidth="1.5"
+				strokeLinejoin="round"
+			/>
+		</svg>
+	);
 }
 
-/**
- * Sloppiness selector (Excalidraw "hand-drawn" levels). Each option previews
- * the roughness by rendering an actual rough.js stroke at that level.
- */
-function SloppinessPicker({
+function ArrowStylePicker({
 	value,
 	onChange,
 }: {
-	value: Sloppiness;
-	onChange: (v: Sloppiness) => void;
+	value: 1 | 2;
+	onChange: (v: 1 | 2) => void;
 }) {
-	const OPTIONS: { value: Sloppiness; title: string }[] = [
-		{ value: 0, title: "Formal" },
-		{ value: 1, title: "Smooth" },
-		{ value: 2, title: "Artist" },
+	const OPTIONS: { value: 1 | 2; title: string }[] = [
+		{ value: 1, title: "Line" },
+		{ value: 2, title: "Brush" },
 	];
 	const [open, setOpen] = useState(false);
 	const ref = useRef<HTMLDivElement>(null);
@@ -4864,17 +5098,14 @@ function SloppinessPicker({
 		document.addEventListener("mousedown", close);
 		return () => document.removeEventListener("mousedown", close);
 	}, [open]);
-	const squiggle = (v: Sloppiness, on: boolean) => (
-		<RoughLevelIcon level={v} active={on} />
-	);
 	return (
 		<div ref={ref} style={{ position: "relative" }}>
 			<button
 				onClick={() => setOpen(!open)}
-				title="Sloppiness"
+				title="Arrow style"
 				style={{
-					width: 32,
-					height: 28,
+					width: 28,
+					height: 26,
 					padding: 0,
 					borderRadius: "var(--radius-s)",
 					border: "none",
@@ -4885,7 +5116,7 @@ function SloppinessPicker({
 					justifyContent: "center",
 				}}
 			>
-				{squiggle(value, open)}
+				<ArrowStyleIcon style={value} on={open} />
 			</button>
 			{open && (
 				<div
@@ -4912,8 +5143,8 @@ function SloppinessPicker({
 							}}
 							title={opt.title}
 							style={{
-								width: 32,
-								height: 28,
+								width: 28,
+								height: 26,
 								padding: 0,
 								border: "none",
 								borderRadius: "var(--radius-s)",
@@ -4925,7 +5156,7 @@ function SloppinessPicker({
 								justifyContent: "center",
 							}}
 						>
-							{squiggle(opt.value, opt.value === value)}
+							<ArrowStyleIcon style={opt.value} on={opt.value === value} />
 						</button>
 					))}
 				</div>

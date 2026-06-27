@@ -4160,13 +4160,21 @@ function App() {
 							: leftX >= 10
 								? leftX
 								: Math.max(10, selection.x); // last-resort fallback
-						const trTop = Math.max(10, selection.y);
+						// Clamp so the whole dialog fits on-screen even when the selection
+						// is near the bottom (was spilling off as a thin unusable strip).
+						const trAnchorBottom = selection.y + 200 > window.innerHeight;
+						const TR_MAXH = trAnchorBottom
+							? Math.min(440, window.innerHeight - 20)
+							: Math.min(440, window.innerHeight - Math.max(8, selection.y) - 12);
+						const trVStyle = trAnchorBottom
+							? { bottom: 12 }
+							: { top: Math.max(8, selection.y) }
 						return (
 						<div
 							style={{
 								position: "absolute",
 								left: trLeft,
-								top: trTop,
+					...trVStyle,
 								width: TR_W,
 								display: "flex",
 								flexDirection: "column",
@@ -4237,6 +4245,8 @@ function App() {
 										userSelect: "text",
 										cursor: "text",
 										minHeight: 20,
+										maxHeight: TR_MAXH - 130,
+										overflowY: "auto",
 									}}
 								>
 									{translateLoading && translateSource ? (
@@ -4314,32 +4324,27 @@ function App() {
 								: leftX >= 10
 									? leftX
 									: Math.max(10, selection.x);
-						const aiTop = Math.max(10, selection.y);
-						// Cap the card to a sane height so a long conversation scrolls
-						// inside it instead of sprawling down the whole screen. Never
-						// exceed the space available below the anchor, but also never
-						// taller than ~460px regardless of how big the display is.
-						const aiMaxH = Math.min(
-							460,
-							Math.max(240, window.innerHeight - aiTop - 20),
-						);
+						// Card height never exceeds the screen; the vertical anchor is
+						// clamped so the WHOLE card fits on-screen even when the selection
+						// sits near the bottom (otherwise it spilled below the screen and
+						// only a thin unusable strip showed).
 						const visibleMsgs = aiMessages.filter((m) => m.role !== "system");
-						// Apply the user's drag offset, clamped so the card can't be
-						// dragged fully off-screen.
-						const aiPosLeft = Math.max(
-							8,
-							Math.min(aiLeft + aiOffset.x, window.innerWidth - AI_W - 8),
-						);
-						const aiPosTop = Math.max(
-							8,
-							Math.min(aiTop + aiOffset.y, window.innerHeight - 120),
-						);
+							const aiPosLeft = Math.max(8, Math.min(aiLeft + aiOffset.x, window.innerWidth - AI_W - 8));
+							// Near the bottom → anchor the card's BOTTOM to the screen bottom (grows
+							// up, no floating gap). Otherwise anchor its top to the selection.
+							const aiAnchorBottom = selection.y + 220 > window.innerHeight;
+							const aiMaxH = aiAnchorBottom
+								? Math.min(460, window.innerHeight - 20)
+								: Math.min(460, window.innerHeight - Math.max(8, selection.y) - 12);
+							const aiVStyle = aiAnchorBottom
+								? { bottom: Math.max(8, Math.min(12 - aiOffset.y, window.innerHeight - 100)) }
+								: { top: Math.max(8, Math.min(selection.y + aiOffset.y, window.innerHeight - 120)) }
 						return (
 							<div
 								style={{
 									position: "absolute",
 									left: aiPosLeft,
-									top: aiPosTop,
+									...aiVStyle,
 									width: AI_W,
 									maxHeight: aiMaxH,
 									display: "flex",

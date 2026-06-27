@@ -1172,15 +1172,20 @@ function App() {
 		await cancelCapture();
 	}, [renderFinalImage, cancelCapture]);
 
-	const toggleRecordCamera = useCallback(() => {
-		setRecordCamera((on) => {
-			const next = !on;
-			invoke(next ? "open_camera_bubble" : "close_camera_bubble").catch(
-				() => {},
-			);
-			return next;
-		});
-	}, []);
+	const toggleRecordCamera = useCallback(async () => {
+		if (recordCamera) {
+			setRecordCamera(false);
+			invoke("close_camera_bubble").catch(() => {});
+			return;
+		}
+		// If the user previously DENIED camera, macOS won't re-prompt — the Rust
+		// side opens the Privacy pane + notifies, and returns false. Don't open a
+		// black bubble in that case.
+		const ok = await invoke<boolean>("ensure_camera_access").catch(() => true);
+		if (!ok) return;
+		setRecordCamera(true);
+		invoke("open_camera_bubble").catch(() => {});
+	}, [recordCamera]);
 
 	// Start recording the chosen source: hide the overlay (so it isn't in the
 	// video), start capture, then show the floating Stop/Pause/timer controls.
@@ -1201,6 +1206,12 @@ function App() {
 			source = "window";
 			window_id = Number(recordSource.split(":")[1]);
 		}
+		// Mic needs permission. If the user enabled mic but previously denied it,
+		// guide them to Settings (Rust opens the Privacy pane + notifies) and
+		// record without audio rather than silently failing.
+		const micOk = recordMic
+			? await invoke<boolean>("ensure_mic_access").catch(() => true)
+			: false;
 		// Keep the camera bubble open through the overlay-hide for recording.
 		startingRecordingRef.current = true;
 		await cancelCapture();
@@ -1210,7 +1221,7 @@ function App() {
 					source,
 					window_id,
 					monitor: null,
-					mic: recordMic,
+					mic: recordMic && micOk,
 					camera: recordCamera,
 					crop,
 				},

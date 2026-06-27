@@ -17,6 +17,73 @@ use crate::services::window_enum::{snapshot_windows, WindowInfo};
 static RECORDING: AtomicBool = AtomicBool::new(false);
 static PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// AVAuthorizationStatus for a media type ("vide" = camera, "soun" = mic):
+/// 0 notDetermined · 1 restricted · 2 denied · 3 authorized.
+#[cfg(target_os = "macos")]
+fn av_auth_status(media: &str) -> i64 {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let mt: id = NSString::alloc(nil).init_str(media);
+        msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: mt]
+    }
+}
+
+/// True if the media type can be used (authorized, or not-yet-asked). If the user
+/// previously DENIED it, macOS will never prompt again — so open the right
+/// Privacy pane + notify and return false. `media`="vide"/"soun".
+#[cfg(target_os = "macos")]
+fn ensure_av(app: &AppHandle, media: &str, pane: &str, label: &str) -> bool {
+    use tauri_plugin_notification::NotificationExt;
+    let s = av_auth_status(media);
+    if s == 1 || s == 2 {
+        let _ = std::process::Command::new("open")
+            .arg(format!(
+                "x-apple.systempreferences:com.apple.preference.security?{pane}"
+            ))
+            .spawn();
+        let _ = app
+            .notification()
+            .builder()
+            .title(format!("{label} is turned off for iShot"))
+            .body(format!(
+                "Enable iShot under System Settings › Privacy & Security › {label}, then try again."
+            ))
+            .show();
+        return false;
+    }
+    true
+}
+
+/// Camera access check — guides the user to Settings if previously denied.
+#[tauri::command]
+pub fn ensure_camera_access(app: AppHandle) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return ensure_av(&app, "vide", "Privacy_Camera", "Camera");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        true
+    }
+}
+
+/// Microphone access check — guides the user to Settings if previously denied.
+#[tauri::command]
+pub fn ensure_mic_access(app: AppHandle) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        return ensure_av(&app, "soun", "Privacy_Microphone", "Microphone");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        true
+    }
+}
+
 /// Displays + windows the user can pick as the recording source. Reuses the
 /// same enumeration that powers screenshot capture / scroll capture.
 #[derive(Serialize)]

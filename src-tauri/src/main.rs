@@ -687,6 +687,8 @@ fn main() {
             commands::recorder::open_record_bar,
             commands::recorder::open_camera_bubble,
             commands::recorder::close_camera_bubble,
+            commands::recorder::ensure_camera_access,
+            commands::recorder::ensure_mic_access,
             commands::recorder::open_recording_preview,
             commands::recorder::save_recording,
             commands::recorder::discard_recording,

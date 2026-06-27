@@ -365,6 +365,23 @@ async fn check_for_updates(app: tauri::AppHandle) {
     }
 }
 
+/// Silent check shortly after launch — if a newer version exists, post a
+/// notification nudging the user to update. Does NOT auto-install; they update
+/// from Settings → "Update now" or the menu's "Check for Updates…".
+async fn notify_if_update(app: tauri::AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+    use tauri_plugin_updater::UpdaterExt;
+    let Ok(updater) = app.updater() else { return };
+    if let Ok(Some(update)) = updater.check().await {
+        let _ = app
+            .notification()
+            .builder()
+            .title(format!("iShot {} is available", update.version))
+            .body("Open Settings → Update now (or the menu's “Check for Updates…”).")
+            .show();
+    }
+}
+
 fn main() {
     // Load saved config
     let config = load_config();
@@ -398,6 +415,15 @@ fn main() {
             // readers (clipboard pruning, panel construction) don't touch
             // disk on every access.
             crate::services::settings::init_cache();
+
+            // Quietly check for an update at launch; notify (no auto-install) if
+            // one's available so the user knows without opening Settings.
+            {
+                let upd_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    notify_if_update(upd_handle).await;
+                });
+            }
 
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

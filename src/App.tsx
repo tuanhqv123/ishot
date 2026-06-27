@@ -4124,7 +4124,7 @@ function App() {
 										<ToolBtn
 											active={scrollCapturing}
 											onClick={handleStartScroll}
-											title="Scroll capture — scroll the page yourself, Esc to finish"
+											title="Scroll capture — scroll down or sideways, then press your finish key to copy"
 										>
 											<ToolIcon icon={ImageDown} />
 										</ToolBtn>

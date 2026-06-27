@@ -7,6 +7,17 @@ interface ProgressPayload {
   thumbnail?: string;
 }
 
+// Human label for a shortcut spec (matches the modifier bitmask: 1 Cmd, 2 Shift,
+// 4 Alt, 8 Ctrl).
+function fmtShortcut(mods: number, key: string): string {
+  let p = "";
+  if (mods & 1) p += "⌘";
+  if (mods & 2) p += "⇧";
+  if (mods & 4) p += "⌥";
+  if (mods & 8) p += "⌃";
+  return p + key;
+}
+
 /**
  * Scroll-capture panel. Reproduces the original vanilla scroll-panel.html
  * behavior exactly (live preview thumbnail bottom-right, Esc/scroll-esc finish,
@@ -53,13 +64,24 @@ export default function ScrollPanel() {
     }
     window.addEventListener("keydown", onKeyDown);
 
-    // Pre-capture hints via the bottom-center HUD. On mount: the scroll hint.
-    // After 3s with no first frame: "Press Esc to finish". HUD auto-fades, so
-    // no revert/loop logic needed.
-    invoke("show_hud", { text: "Scroll down or right, steadily" }).catch(() => {});
+    // Pre-capture hints via the bottom-center HUD. Scroll works vertically OR
+    // horizontally, and the finish/copy key is user-configurable (default Enter)
+    // — show the actual configured key, not a hardcoded Esc.
+    let finishKey = "Enter";
+    invoke("show_hud", {
+      text: "Scroll down or sideways, steadily",
+    }).catch(() => {});
+    invoke<{ shortcuts?: { scroll_finish?: { modifiers: number; key: string } } }>(
+      "get_settings",
+    )
+      .then((s) => {
+        const sc = s?.shortcuts?.scroll_finish;
+        if (sc) finishKey = fmtShortcut(sc.modifiers, sc.key);
+      })
+      .catch(() => {});
     const hintTimer = window.setTimeout(() => {
       if (gotFirstFrame.current) return;
-      invoke("show_hud", { text: "Press Esc to finish" }).catch(() => {});
+      invoke("show_hud", { text: `Press ${finishKey} to copy` }).catch(() => {});
     }, 3000);
 
     const unlisten: Promise<UnlistenFn>[] = [];

@@ -3,6 +3,8 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { GRADIENT_PRESETS, gradientCss } from "./gradients";
 import Dropdown from "./Dropdown";
+import type { ThemePref } from "./theme";
+import { Eye, EyeOff } from "./icons";
 
 // Modifier bitmask mirrors the Rust side: 1=Cmd, 2=Shift, 4=Alt, 8=Ctrl.
 const MOD_META = 1;
@@ -11,7 +13,11 @@ const MOD_ALT = 4;
 const MOD_CTRL = 8;
 
 type ShortcutSpec = { modifiers: number; key: string };
-type Shortcuts = { capture: ShortcutSpec; clipboard: ShortcutSpec };
+type Shortcuts = {
+  capture: ShortcutSpec;
+  clipboard: ShortcutSpec;
+  scroll_finish: ShortcutSpec;
+};
 type AiConfig = { base_url: string; model: string };
 // Screenshot-background appearance. Fixed contract — must match the Rust
 // AppearanceConfig exactly so the get_settings/save_settings round-trip works.
@@ -31,6 +37,7 @@ type SettingsT = {
   retention: number;
   ai: AiConfig;
   appearance: AppearanceConfig;
+  theme: ThemePref;
 };
 
 // Defaults applied in code when an older settings.json lacks `appearance`, so the
@@ -81,17 +88,15 @@ const COLOR_LABELS: Record<string, string> = {
 // Radius/padding as easy preset options (instead of fiddly sliders).
 const RADIUS_OPTIONS = [
   { value: "0", label: "None" },
-  { value: "8", label: "Small" },
-  { value: "16", label: "Medium" },
-  { value: "24", label: "Large" },
-  { value: "40", label: "Extra large" },
+  { value: "4", label: "Small" },
+  { value: "8", label: "Medium" },
+  { value: "16", label: "Large" },
 ];
 const PADDING_OPTIONS = [
   { value: "0", label: "None" },
-  { value: "32", label: "Small" },
-  { value: "64", label: "Medium" },
-  { value: "96", label: "Large" },
-  { value: "128", label: "Extra large" },
+  { value: "16", label: "Small" },
+  { value: "32", label: "Medium" },
+  { value: "64", label: "Large" },
 ];
 
 // Resolves the CSS `background` for a given appearance, using a cached
@@ -136,15 +141,20 @@ function eventToKey(e: KeyboardEvent): string | null {
   if (/^Digit[0-9]$/.test(code)) return code.slice(5);
   if (/^F([1-9]|1[0-2])$/.test(code)) return code;
   if (code === "Space") return "Space";
+  if (code === "Enter" || code === "NumpadEnter") return "Enter";
+  if (code === "Tab") return "Tab";
   return null;
 }
 
 function ShortcutInput({
   spec,
   onChange,
+  allowNoMods,
 }: {
   spec: ShortcutSpec;
   onChange: (s: ShortcutSpec) => void;
+  /** Allow a single key with no modifier (e.g. Enter for scroll finish). */
+  allowNoMods?: boolean;
 }) {
   const [recording, setRecording] = useState(false);
 
@@ -166,13 +176,13 @@ function ShortcutInput({
       if (e.shiftKey) mods |= MOD_SHIFT;
       if (e.altKey) mods |= MOD_ALT;
       if (e.ctrlKey) mods |= MOD_CTRL;
-      if (mods === 0) return; // require at least one modifier
+      if (mods === 0 && !allowNoMods) return; // require at least one modifier
       onChange({ modifiers: mods, key });
       setRecording(false);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [recording, onChange]);
+  }, [recording, onChange, allowNoMods]);
 
   const pills = modsToString(spec.modifiers);
   return (
@@ -200,6 +210,7 @@ export default function Settings() {
   const [settings, setSettings] = useState<SettingsT | null>(null);
   const [hasKey, setHasKey] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
+  const [showKey, setShowKey] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   // Model ids fetched from {base_url}/models — populated automatically whenever
   // the base URL / API key changes (no manual "Fetch" button). Shown in a
@@ -215,6 +226,10 @@ export default function Settings() {
   // shown in the footer.
   const [autostart, setAutostart] = useState(false);
   const [version, setVersion] = useState("");
+  const [osVersion, setOsVersion] = useState("");
+  // Available update version (null = none / not checked yet) + install state.
+  const [updateVer, setUpdateVer] = useState<string | null>(null);
+  const [updating, setUpdating] = useState(false);
   // "Support" toggles into two region options (both open a web link).
   const [donateOpen, setDonateOpen] = useState(false);
 
@@ -224,14 +239,28 @@ export default function Settings() {
     );
   };
 
+  // Pre-filled email so users can report a bug WITHOUT a GitHub account.
+  const reportIssue = () => {
+    const subject = encodeURIComponent(`iShot issue (v${version})`);
+    const body = encodeURIComponent(
+      `What happened:\n\n\nSteps to reproduce:\n\n\n—\niShot v${version} · macOS ${osVersion || "?"}`,
+    );
+    openUrl(`mailto:timtran7149@gmail.com?subject=${subject}&body=${body}`);
+  };
+
   useEffect(() => {
     (async () => {
       try {
         setAutostart(await invoke<boolean>("get_autostart"));
         setVersion(await invoke<string>("get_app_version"));
+        setOsVersion(await invoke<string>("get_os_version"));
       } catch (e) {
         console.error("load autostart/version failed", e);
       }
+      // Quietly check for an update so the footer can offer it inline.
+      invoke<string | null>("check_update")
+        .then((v) => setUpdateVer(v))
+        .catch((e) => console.error("check_update failed", e));
     })();
   }, []);
 
@@ -265,7 +294,9 @@ export default function Settings() {
         ...DEFAULT_APPEARANCE,
         ...(s.appearance ?? {}),
       };
-      setSettings({ ...s, appearance });
+      // Older configs predate `theme` — default to following the system.
+      const theme: ThemePref = s.theme ?? "system";
+      setSettings({ ...s, appearance, theme });
       if (appearance.kind === "wallpaper") loadWallpaper();
       const present = await invoke<boolean>("has_api_key");
       setHasKey(present);
@@ -313,23 +344,21 @@ export default function Settings() {
     return () => clearTimeout(t);
   }, [settings, loaded]);
 
-  // Auto-save the API key as the user types (debounced) — no Save button.
-  // Empty input is left alone (it just means "unchanged"), so the stored key
-  // isn't wiped by an empty field.
-  useEffect(() => {
-    if (!loaded) return;
+  // The API key is committed explicitly via the Save button (below), not as you
+  // type. After saving we clear the field so the next visit just shows the
+  // "saved" placeholder.
+  const saveApiKey = useCallback(async () => {
     const key = apiKeyInput.trim();
     if (!key) return;
-    const t = setTimeout(() => {
-      invoke("set_api_key", { key })
-        .then(() => setHasKey(true))
-        .catch((e) => {
-          console.error("set_api_key failed", e);
-          setStatus(`API key save failed: ${e}`);
-        });
-    }, 600);
-    return () => clearTimeout(t);
-  }, [apiKeyInput, loaded]);
+    try {
+      await invoke("set_api_key", { key });
+      setHasKey(true);
+      setApiKeyInput("");
+    } catch (e) {
+      console.error("set_api_key failed", e);
+      setStatus(`API key save failed: ${e}`);
+    }
+  }, [apiKeyInput]);
 
   // Auto-fetch the model list whenever the base URL / API key changes
   // (debounced) — no manual "Fetch" button.
@@ -339,7 +368,12 @@ export default function Settings() {
     const t = setTimeout(() => {
       invoke<string[]>("list_ai_models", { baseUrl, apiKey: apiKeyInput })
         .then((ids) => setAvailableModels(ids))
-        .catch((e) => console.error("list_ai_models failed", e));
+        .catch((e) => {
+          // Clear the list on failure (e.g. wrong key) so a stale list doesn't
+          // make an invalid key look valid.
+          console.error("list_ai_models failed", e);
+          setAvailableModels([]);
+        });
     }, 700);
     return () => clearTimeout(t);
   }, [baseUrl, apiKeyInput, hasKey, loaded]);
@@ -434,6 +468,14 @@ export default function Settings() {
               onChange={(clipboard) => updateShortcuts({ clipboard })}
             />
           </div>
+          <div className="st-row">
+            <div className="st-label">Finish scroll capture</div>
+            <ShortcutInput
+              spec={settings.shortcuts.scroll_finish}
+              allowNoMods
+              onChange={(scroll_finish) => updateShortcuts({ scroll_finish })}
+            />
+          </div>
         </section>
 
         <section className="st-section">
@@ -452,6 +494,23 @@ export default function Settings() {
             >
               <span className="st-switch-knob" />
             </button>
+          </div>
+        </section>
+
+        <section className="st-section">
+          <div className="st-section-title">Appearance</div>
+          <div className="st-row">
+            <div className="st-label">Theme</div>
+            <Dropdown
+              value={settings.theme}
+              width={190}
+              options={[
+                { value: "system", label: "System" },
+                { value: "light", label: "Light" },
+                { value: "dark", label: "Dark" },
+              ]}
+              onChange={(v) => update({ theme: v as ThemePref })}
+            />
           </div>
         </section>
 
@@ -489,22 +548,45 @@ export default function Settings() {
             />
           </div>
           <div className="st-row">
+            <div className="st-label">API key</div>
+            <div className="st-key-col">
+              <div className="st-key-field">
+                <input
+                  className="st-input"
+                  type={showKey ? "text" : "password"}
+                  placeholder={hasKey ? "•••••••• saved" : "sk-…"}
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") saveApiKey();
+                  }}
+                />
+                {apiKeyInput !== "" && (
+                  <button
+                    type="button"
+                    className="st-key-eye"
+                    title={showKey ? "Hide" : "Show"}
+                    onClick={() => setShowKey((v) => !v)}
+                  >
+                    {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                )}
+              </div>
+              {apiKeyInput.trim() !== "" && availableModels.length > 0 && (
+                <div className="st-key-hint">
+                  Key works — pick a model below, then Save.
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="st-row">
             <div className="st-label">Model</div>
             <Dropdown
               value={settings.ai.model}
               onChange={(v) => updateAi({ model: v })}
               maxHeight={200}
+              fill
               options={modelOptions}
-            />
-          </div>
-          <div className="st-row">
-            <div className="st-label">API key</div>
-            <input
-              className="st-input"
-              type="password"
-              placeholder={hasKey ? "•••••••• (saved)" : "sk-…"}
-              value={apiKeyInput}
-              onChange={(e) => setApiKeyInput(e.target.value)}
             />
           </div>
         </section>
@@ -534,6 +616,7 @@ export default function Settings() {
                   }
                   onChange={onBgChange}
                   maxHeight={200}
+                  width={190}
                   options={[
                     { value: "wallpaper", label: "Current wallpaper" },
                     { value: "image", label: "Custom image…" },
@@ -558,6 +641,7 @@ export default function Settings() {
                   value={nearest(app.radius, RADIUS_OPTIONS)}
                   onChange={(v) => updateAppearance({ radius: parseInt(v, 10) })}
                   options={RADIUS_OPTIONS}
+                  width={190}
                 />
               </div>
 
@@ -567,6 +651,7 @@ export default function Settings() {
                   value={nearest(app.padding, PADDING_OPTIONS)}
                   onChange={(v) => updateAppearance({ padding: parseInt(v, 10) })}
                   options={PADDING_OPTIONS}
+                  width={190}
                 />
               </div>
             </div>
@@ -612,13 +697,23 @@ export default function Settings() {
 
             {/* "Support" → REPLACED by the two region options when clicked. */}
             {!donateOpen && (
-              <button
-                type="button"
-                className="st-support-btn"
-                onClick={() => setDonateOpen(true)}
-              >
-                Support
-              </button>
+              <div className="st-about-actions">
+                <button
+                  type="button"
+                  className="st-support-btn"
+                  onClick={() => setDonateOpen(true)}
+                >
+                  Support
+                </button>
+                <button
+                  type="button"
+                  className="st-support-btn"
+                  onClick={reportIssue}
+                  title="Email a bug report (no account needed)"
+                >
+                  Report issue
+                </button>
+              </div>
             )}
 
             {donateOpen && (
@@ -654,10 +749,38 @@ export default function Settings() {
       </div>
 
       <div className="st-footer">
-        {status && <div className="st-status">{status}</div>}
+        {updateVer ? (
+          <div className="st-update">
+            <span className="st-update-text">Update available — v{updateVer}</span>
+            <button
+              type="button"
+              className="st-btn st-btn-on"
+              disabled={updating}
+              onClick={() => {
+                setUpdating(true);
+                invoke("install_update").catch((e) => {
+                  console.error("install_update failed", e);
+                  setStatus(`Update failed: ${e}`);
+                  setUpdating(false);
+                });
+              }}
+            >
+              {updating ? "Updating…" : "Update now"}
+            </button>
+          </div>
+        ) : (
+          status && <div className="st-status">{status}</div>
+        )}
         <div className="st-footer-buttons">
-          <button className="st-btn st-btn-primary" onClick={hide} type="button">
-            Done
+          <button
+            className="st-btn st-btn-primary"
+            onClick={async () => {
+              await saveApiKey();
+              hide();
+            }}
+            type="button"
+          >
+            Save
           </button>
         </div>
       </div>

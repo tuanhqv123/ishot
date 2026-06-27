@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Pause, Play, Square } from "./icons";
+import { ToolIcon } from "./ToolIcon";
 
 interface RecordingStatus {
 	recording: boolean;
@@ -123,7 +124,11 @@ export default function Recording() {
 					onClick={togglePause}
 					style={iconBtn}
 				>
-					{status.paused ? <Play size={16} /> : <Pause size={16} />}
+					{status.paused ? (
+						<ToolIcon icon={Play} box={16} />
+					) : (
+						<ToolIcon icon={Pause} box={16} />
+					)}
 				</button>
 				<button
 					type="button"
@@ -140,7 +145,7 @@ export default function Recording() {
 						fontWeight: 600,
 					}}
 				>
-					<Square size={11} weight="fill" />
+					<Square size={13} weight="fill" />
 					Stop
 				</button>
 			</div>

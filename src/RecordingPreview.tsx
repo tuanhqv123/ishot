@@ -154,13 +154,13 @@ export default function RecordingPreview() {
 	});
 
 	return (
-		<div className="flex h-screen w-screen flex-col gap-2.5 overflow-hidden rounded-[14px] bg-[rgba(24,24,26,0.99)] p-3 text-white select-none">
+		<div className="flex h-screen w-screen flex-col gap-2.5 overflow-hidden rounded-[14px] bg-[var(--window-bg)] p-3 text-[var(--ink-95)] select-none">
 			{/* No title — just a draggable strip with a plain icon close button. */}
 			<div data-tauri-drag-region className="flex items-center justify-end">
 				<button
 					type="button"
 					onClick={() => getCurrentWindow().close()}
-					className="flex items-center justify-center text-white/45 hover:text-white"
+					className="flex items-center justify-center text-[var(--ink-40)] hover:text-[var(--ink-95)]"
 				>
 					<X size={16} />
 				</button>
@@ -227,7 +227,7 @@ export default function RecordingPreview() {
 			</div>
 
 			<div className="flex items-center justify-between">
-				<span className="text-[12px] text-white/55">
+				<span className="text-[12px] text-[var(--ink-55)]">
 					{err ? (
 						<span className="text-[#ff6b6b]">{err}</span>
 					) : (
@@ -238,7 +238,7 @@ export default function RecordingPreview() {
 					<button
 						type="button"
 						onClick={discard}
-						className="h-9 rounded-lg bg-white/10 px-4 text-[13px] font-medium text-white hover:bg-white/20"
+						className="h-9 rounded-lg bg-[var(--ink-10)] px-4 text-[13px] font-medium text-[var(--ink-95)] hover:bg-[var(--ink-18)]"
 					>
 						Discard
 					</button>

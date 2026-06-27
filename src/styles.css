@@ -20,19 +20,9 @@ body {
    (toolbar, pickers, chat dialog). macOS system values, light appearance —
    every surface here shows TOGETHER, so they share one palette/geometry. */
 :root {
-  /* macOS system colors (light appearance) */
-  --accent: #007aff;          /* systemBlue */
-  --accent-strong: #0a84ff;
-  --red: #ff3b30;             /* systemRed */
-
-  /* Surfaces & content (light) */
-  --surface: rgba(255, 255, 255, 0.97);
-  --hover: rgba(0, 0, 0, 0.06);
-  --fill: rgba(0, 0, 0, 0.05);   /* assistant bubble, input field */
-  --label: rgba(0, 0, 0, 0.85);
-  --label-2: rgba(0, 0, 0, 0.5);
-  --label-3: rgba(0, 0, 0, 0.3);
-  --separator: rgba(0, 0, 0, 0.1);
+  /* Colour tokens (--accent, --surface, --label, --separator, …) now live in
+     theme.css with light + dark variants. Only theme-agnostic geometry/shadow
+     tokens remain here. */
 
   /* Geometry */
   --radius-l: 12px;   /* cards / dialogs */
@@ -53,13 +43,13 @@ body {
 .ai-md li { margin: 2px 0; }
 .ai-md code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  background: rgba(0, 0, 0, 0.07);
+  background: var(--fill);
   padding: 1px 5px;
   border-radius: 4px;
   font-size: 0.92em;
 }
 .ai-md pre {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--fill);
   padding: 8px 10px;
   border-radius: 6px;
   overflow-x: auto;
@@ -103,19 +93,21 @@ body {
   font-size: 13px;
   font-weight: 500;
   letter-spacing: 0.01em;
+  /* Theme-aware shimmer: ink inverts (black on light, white on dark). Softer
+     contrast so it reads "calm", not heavy. */
   background: linear-gradient(
     100deg,
-    rgba(0, 0, 0, 0.22) 40%,
-    rgba(0, 0, 0, 0.58) 50%,
-    rgba(0, 0, 0, 0.22) 60%
+    var(--ink-25) 42%,
+    var(--ink-60) 50%,
+    var(--ink-25) 58%
   );
   background-size: 220% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
   animation:
-    ishot-wave 4s ease-in-out infinite,
-    ishot-fade 600ms ease both;   /* pure fade on word change — no slide */
+    ishot-wave 5.5s ease-in-out infinite,
+    ishot-fade 900ms ease both;   /* gentle ease fade on word change */
 }
 @keyframes ishot-wave {
   0% { background-position: 150% 0; }
@@ -154,13 +146,43 @@ body {
 .ai-send:active { transform: scale(0.92); }
 .ai-send:disabled { opacity: 0.35; cursor: default; background: var(--accent); }
 
+/* ── Hover tooltip for toolbar buttons ──────────────────────────────────
+   Native `title` tooltips don't reliably appear in the non-activating overlay
+   panel, so render our own. Dark pill below the button, short hover delay. */
+.tt-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.tt {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: rgba(0, 0, 0, 0.82);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 5px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 110ms ease;
+  z-index: 600;
+}
+.tt-wrap:hover .tt {
+  opacity: 1;
+  transition-delay: 0.4s;
+}
+
 /* ── Custom slider (blur strength) — replaces the ugly native range ───── */
 .ishot-range {
   -webkit-appearance: none;
   appearance: none;
   height: 4px;
   border-radius: 2px;
-  background: rgba(0, 0, 0, 0.14);
+  background: var(--fill);
   cursor: pointer;
   outline: none;
 }

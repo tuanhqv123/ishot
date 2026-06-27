@@ -26,6 +26,7 @@ export default defineConfig(async () => ({
 				),
 				"clipboard-history": path.resolve(__dirname, "clipboard-history.html"),
 				settings: path.resolve(__dirname, "settings.html"),
+				pin: path.resolve(__dirname, "pin.html"),
 			},
 		},
 	},

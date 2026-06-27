@@ -111,8 +111,11 @@ pub async fn list_clipboard_history() -> Result<Vec<HistoryItem>, String> {
                     continue;
                 }
                 if let Ok(img) = image::open(src) {
-                    // ~320px longest side keeps the list crisp but tiny to decode.
-                    let thumb = img.thumbnail(320, 320);
+                    // Longest side ~1200px: the panel is 640pt wide, so on a 2×
+                    // Retina display the list image needs ~1184px to stay crisp.
+                    // Big enough that the thumb never renders smaller than the full
+                    // image (no "flash big then shrink"), still fast to decode.
+                    let thumb = img.thumbnail(1200, 1200);
                     let _ = thumb.to_rgb8().save(&dst);
                 }
             }

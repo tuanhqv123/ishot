@@ -9,7 +9,7 @@ import {
 	Circle,
 	Download,
 	Droplet,
-	Cards,
+	ImageDown,
 	Languages,
 	Mic,
 	MicOff,
@@ -25,8 +25,12 @@ import {
 	Video,
 	VideoOff,
 	X,
-	type LucideIcon,
+	Pin,
+	AlignLeft,
+	AlignCenter,
+	AlignRight,
 } from "./icons";
+import { ToolIcon } from "./ToolIcon";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rough from "roughjs";
@@ -132,6 +136,8 @@ interface Annotation {
 	/// contentEditable's innerHTML. `text` keeps the plain innerText for
 	/// empty-checks and as a legacy-export fallback.
 	html?: string;
+	/// Text alignment for a textbox. Default left.
+	align?: "left" | "center" | "right";
 }
 
 // Stroke style: how hand-drawn / rough a shape looks. All levels render through
@@ -533,6 +539,17 @@ function App() {
 	// Latest redrawAnnotations, callable from event handlers (e.g. Esc) without
 	// re-subscribing them or hitting TDZ on the callback defined further down.
 	const redrawRef = useRef<() => void>(() => {});
+	// Live contentEditable elements per textbox id, so we can measure + auto-grow
+	// the box height to fit content (and re-measure after a width resize).
+	const textElsRef = useRef<Record<number, HTMLDivElement | null>>({});
+	// In-flight textbox width resize.
+	const textResizeRef = useRef<{
+		id: number;
+		side: "l" | "r";
+		startX: number;
+		origX: number;
+		origW: number;
+	} | null>(null);
 	const [blurStrength, setBlurStrength] = useState(10);
 	const [tempBlur, setTempBlur] = useState<Region | null>(null);
 	const [fontSize, setFontSize] = useState(
@@ -669,6 +686,34 @@ function App() {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [editingTextId, selectedAnnotation]);
 
+	// Set paragraph alignment on the textbox being edited/selected.
+	const setTextAlign = useCallback(
+		(align: "left" | "center" | "right") => {
+			const target = editingTextId ?? selectedAnnotation;
+			if (target === null) return;
+			setAnnotations((prev) =>
+				prev.map((a) =>
+					a.id === target && a.type === "textbox" ? { ...a, align } : a,
+				),
+			);
+		},
+		[editingTextId, selectedAnnotation],
+	);
+
+	// The effective color+size at the caret, as a CSS string. Used so every run
+	// edit (bold/underline/color/size) carries BOTH properties — WebKit splits
+	// runs on edit, and a span missing color/size would otherwise reset them.
+	const caretRunStyle = (sel: Selection): string => {
+		const anchor = sel.anchorNode;
+		const el = (
+			anchor && anchor.nodeType === 3 ? anchor.parentElement : anchor
+		) as HTMLElement | null;
+		const cs = el ? getComputedStyle(el) : null;
+		const color = cs?.color || "";
+		const size = cs?.fontSize || "";
+		return `${color ? `color:${color};` : ""}${size ? `font-size:${size};` : ""}`;
+	};
+
 	// Toggle bold/underline at the caret of the textbox being edited.
 	//
 	// With a real selection, execCommand handles the toggle fine. With a
@@ -696,10 +741,12 @@ function App() {
 			}
 
 			const wasOn = document.queryCommandState(kind);
+			// Marker carries the current color+size so toggling bold/underline never
+			// drops them (WebKit splits the styled run around the inserted node).
 			document.execCommand(
 				"insertHTML",
 				false,
-				'<span data-ts="1">\u200B</span>',
+				`<span data-ts="1" style="${caretRunStyle(sel)}">\u200B</span>`,
 			);
 			const marker = root.querySelector('[data-ts="1"]') as HTMLElement | null;
 			if (!marker) return;
@@ -749,9 +796,14 @@ function App() {
 					if (!found) break;
 					while (found.contains(marker)) splitOut(marker);
 				}
+			} else if (kind === "underline") {
+				// ON underline: put text-decoration on the MARKER span (which already
+				// carries the run's color+size) — so the line uses currentColor = the
+				// current text color, not a wrapping <u>'s inherited block color.
+				marker.style.textDecoration = "underline";
 			} else {
-				// ON: wrap the marker so typing continues inside the new style.
-				const wrap = document.createElement(kind === "bold" ? "b" : "u");
+				// ON bold: wrap so typing continues bold (no color concern for bold).
+				const wrap = document.createElement("b");
 				marker.parentNode?.insertBefore(wrap, marker);
 				wrap.appendChild(marker);
 			}
@@ -791,12 +843,37 @@ function App() {
 			const sel = window.getSelection();
 			if (!sel || sel.rangeCount === 0) return;
 
+			// Compose the FULL run style (color + size) from what's effective at the
+			// caret, then override the changed property. Otherwise WebKit splits the
+			// existing run and the new span loses the other property (e.g. changing
+			// size reverted the colour to the box default).
+			const anchor = sel.anchorNode;
+			const caretEl = (
+				anchor && anchor.nodeType === 3 ? anchor.parentElement : anchor
+			) as HTMLElement | null;
+			const cs = caretEl ? getComputedStyle(caretEl) : null;
+			let color = cs?.color || "";
+			let size = cs?.fontSize || "";
+			const weight = cs?.fontWeight || "";
+			const deco = cs?.textDecorationLine || cs?.textDecoration || "";
+			const m = css.trim();
+			if (m.startsWith("color:")) color = m.slice(6).trim().replace(/;$/, "");
+			else if (m.startsWith("font-size:"))
+				size = m.slice(10).trim().replace(/;$/, "");
+			// Carry bold/underline too, so changing colour/size never drops them.
+			const isBold = /^(bold|[6-9]00)$/.test(weight);
+			const isUnder = /underline/.test(deco);
+			const styleStr =
+				`${color ? `color:${color};` : ""}${size ? `font-size:${size};` : ""}` +
+					`${isBold ? `font-weight:${weight};` : ""}` +
+					`${isUnder ? "text-decoration:underline;" : ""}` || css;
+
 			if (!sel.isCollapsed) {
 				// Real selection → wrap the extracted range in a styled span.
 				const range = sel.getRangeAt(0);
 				const frag = range.extractContents();
 				const span = document.createElement("span");
-				span.setAttribute("style", css);
+				span.setAttribute("style", styleStr);
 				span.appendChild(frag);
 				range.insertNode(span);
 				// Move caret to end of the new span.
@@ -811,7 +888,7 @@ function App() {
 				document.execCommand(
 					"insertHTML",
 					false,
-					`<span data-ts="1" style="${css}">​</span>`,
+					`<span data-ts="1" style="${styleStr}">​</span>`,
 				);
 				const marker = root.querySelector(
 					'[data-ts="1"]',
@@ -1135,6 +1212,7 @@ function App() {
 					`width:${ann.w}px;height:${ann.h}px;padding:2px;box-sizing:border-box;` +
 					`color:${ann.color || "#ff0000"};` +
 					`font:${ann.fontSize || 16}px Helvetica, Arial, sans-serif;` +
+					`text-align:${ann.align || "left"};` +
 					`line-height:1.3;white-space:pre-wrap;word-break:break-word;overflow:hidden;`;
 				const svg =
 					`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
@@ -1391,6 +1469,88 @@ function App() {
 			console.error(e);
 		}
 	}, [renderFinalImage, cancelCapture]);
+
+	// Pin to screen: float the finished capture as a borderless always-on-top
+	// window (for side-by-side reference / data entry), then close the overlay.
+	const handlePin = useCallback(async () => {
+		const cv = await renderFinalImage();
+		if (!cv) return;
+		try {
+			const dpr = window.devicePixelRatio || 1;
+			const lw = Math.max(1, Math.round(cv.width / dpr));
+			const lh = Math.max(1, Math.round(cv.height / dpr));
+			const blob = await new Promise<Blob | null>((r) =>
+				cv.toBlob(r, "image/png"),
+			);
+			if (!blob) return;
+			const png = new Uint8Array(await blob.arrayBuffer());
+			// Payload: [logical_w u32 LE][logical_h u32 LE][PNG bytes…]
+			const payload = new Uint8Array(8 + png.byteLength);
+			const dv = new DataView(payload.buffer);
+			dv.setUint32(0, lw, true);
+			dv.setUint32(4, lh, true);
+			payload.set(png, 8);
+			await invoke("pin_image", payload);
+			await cancelCapture();
+		} catch (e) {
+			console.error("pin_image failed", e);
+		}
+	}, [renderFinalImage, cancelCapture]);
+
+	// Auto-grow a textbox to fit its content (PowerPoint-style — never clips).
+	// Called on input + after a width resize (re-wrap changes height).
+	const syncTextHeight = (id: number) => {
+		const el = textElsRef.current[id];
+		if (!el) return;
+		const h = el.scrollHeight + 2; // + outer 1px border top/bottom
+		setAnnotations((prev) =>
+			prev.map((a) =>
+				a.id === id && a.type === "textbox" && Math.abs((a.h || 0) - h) > 1
+					? { ...a, h }
+					: a,
+			),
+		);
+	};
+
+	// Drag a textbox side handle to set its wrap width; height re-fits after.
+	const startTextResize =
+		(id: number, side: "l" | "r") => (e: React.MouseEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const ann = annotations.find((a) => a.id === id);
+			if (!ann) return;
+			textResizeRef.current = {
+				id,
+				side,
+				startX: e.clientX,
+				origX: ann.x,
+				origW: ann.w || 0,
+			};
+			const MIN = 40;
+			const onMove = (me: MouseEvent) => {
+				const r = textResizeRef.current;
+				if (!r) return;
+				const dx = me.clientX - r.startX;
+				setAnnotations((prev) =>
+					prev.map((a) => {
+						if (a.id !== r.id) return a;
+						if (r.side === "r") return { ...a, w: Math.max(MIN, r.origW + dx) };
+						// Left handle: keep the right edge fixed.
+						const w = Math.max(MIN, r.origW - dx);
+						return { ...a, w, x: r.origX + (r.origW - w) };
+					}),
+				);
+			};
+			const onUp = () => {
+				window.removeEventListener("mousemove", onMove);
+				window.removeEventListener("mouseup", onUp);
+				const r = textResizeRef.current;
+				textResizeRef.current = null;
+				if (r) requestAnimationFrame(() => syncTextHeight(r.id));
+			};
+			window.addEventListener("mousemove", onMove);
+			window.addEventListener("mouseup", onUp);
+		};
 
 	const handleUndo = useCallback(() => {
 		setAnnotations((prev) => prev.slice(0, -1));
@@ -2992,21 +3152,29 @@ function App() {
 					blurStrength,
 				},
 			]);
-		} else if (
-			tool === "textbox" &&
-			tempBlur &&
-			tempBlur.width > 20 &&
-			tempBlur.height > 15
-		) {
+		} else if (tool === "textbox" && tempBlur) {
+			// Click = drop a default box and start typing (no drag needed); a real
+			// drag sets an explicit width. Height auto-grows to the text either way.
+			const dragged = tempBlur.width > 20 && tempBlur.height > 15;
+			const w = dragged ? tempBlur.width : 220;
+			const h = dragged
+				? tempBlur.height
+				: Math.round((fontSize || 16) * 1.4 + 6);
+			const tx = selection
+				? Math.max(0, Math.min(tempBlur.x, selection.width - w))
+				: tempBlur.x;
+			const ty = selection
+				? Math.max(0, Math.min(tempBlur.y, selection.height - h))
+				: tempBlur.y;
 			setAnnotations((prev) => [
 				...prev,
 				{
 					id,
 					type: "textbox",
-					x: tempBlur.x,
-					y: tempBlur.y,
-					w: tempBlur.width,
-					h: tempBlur.height,
+					x: tx,
+					y: ty,
+					w,
+					h,
 					color: strokeColor,
 					text: "",
 					html: "",
@@ -3338,11 +3506,21 @@ function App() {
 											dy = me.clientY - startY;
 										if (!moved && Math.hypot(dx, dy) < 4) return;
 										moved = true;
+										// Clamp so the box can't be dragged outside the capture
+										// region.
+										const bw = ann.w || 0;
+										const bh = ann.h || 0;
+										const nx = Math.max(
+											0,
+											Math.min(origX + dx, selection.width - bw),
+										);
+										const ny = Math.max(
+											0,
+											Math.min(origY + dy, selection.height - bh),
+										);
 										setAnnotations((prev) =>
 											prev.map((a) =>
-												a.id === ann.id
-													? { ...a, x: origX + dx, y: origY + dy }
-													: a,
+												a.id === ann.id ? { ...a, x: nx, y: ny } : a,
 											),
 										);
 									};
@@ -3360,7 +3538,10 @@ function App() {
 									left: selection.x + ann.x,
 									top: selection.y + ann.y,
 									width: ann.w,
-									height: ann.h,
+									// Height auto-grows to fit the text (PowerPoint-style); the
+									// stored ann.h is kept in sync for the export raster.
+									height: "auto",
+									minHeight: 22,
 									zIndex: 11,
 									cursor: editingTextId === ann.id ? "text" : "move",
 									// Committed text reads as part of the image — the frame
@@ -3423,6 +3604,7 @@ function App() {
 									suppressContentEditableWarning
 									data-ph="Type here..."
 									ref={(el) => {
+										textElsRef.current[ann.id] = el;
 										if (!el) return;
 										if (!el.innerHTML && ann.html) el.innerHTML = ann.html;
 										if (ann.id === editingTextId && document.activeElement !== el) {
@@ -3435,6 +3617,8 @@ function App() {
 											sel?.removeAllRanges();
 											sel?.addRange(r);
 										}
+										// Fit the stored height to the seeded content (legacy boxes).
+										requestAnimationFrame(() => syncTextHeight(ann.id));
 									}}
 									onInput={(e) => {
 										const el = e.currentTarget;
@@ -3445,6 +3629,7 @@ function App() {
 												a.id === ann.id ? { ...a, html, text } : a,
 											),
 										);
+										syncTextHeight(ann.id);
 									}}
 									onFocus={() => setEditingTextId(ann.id)}
 									onBlur={(e) => {
@@ -3457,13 +3642,15 @@ function App() {
 									}}
 									style={{
 										width: "100%",
-										height: "100%",
+										height: "auto",
+										minHeight: 18,
 										background: "transparent",
 										border: "none",
 										outline: "none",
 										color: ann.color || "#ff0000",
 										fontSize: ann.fontSize || 16,
 										fontFamily: "Helvetica, Arial, sans-serif",
+										textAlign: ann.align || "left",
 										padding: 2,
 										lineHeight: 1.3,
 										caretColor: ann.color || "#ff0000",
@@ -3472,6 +3659,29 @@ function App() {
 										overflow: "hidden",
 									}}
 								/>
+								{/* Width resize handles (height auto-fits). Shown when the box
+								    is selected or being edited. */}
+								{(ann.id === selectedAnnotation ||
+									editingTextId === ann.id) &&
+									(["l", "r"] as const).map((side) => (
+										<div
+											key={side}
+											onMouseDown={startTextResize(ann.id, side)}
+											style={{
+												position: "absolute",
+												top: "50%",
+												[side === "l" ? "left" : "right"]: -4,
+												transform: "translateY(-50%)",
+												width: 8,
+												height: 18,
+												borderRadius: 4,
+												background: "rgba(255,255,255,0.95)",
+												boxShadow: "0 0 2px rgba(0,0,0,0.5)",
+												cursor: "ew-resize",
+												zIndex: 12,
+											}}
+										/>
+									))}
 							</div>
 						))}
 
@@ -3916,7 +4126,7 @@ function App() {
 											onClick={handleStartScroll}
 											title="Scroll capture — scroll the page yourself, Esc to finish"
 										>
-											<ToolIcon icon={Cards} />
+											<ToolIcon icon={ImageDown} />
 										</ToolBtn>
 										<ToolBtn
 											onClick={handleTranslate}
@@ -3962,6 +4172,9 @@ function App() {
 										</ToolBtn>
 										<ToolBtn onClick={handleSave} title="Save">
 											<ToolIcon icon={Download} />
+										</ToolBtn>
+										<ToolBtn onClick={handlePin} title="Pin to screen">
+											<ToolIcon icon={Pin} />
 										</ToolBtn>
 										<ToolBtn
 											onClick={cancelCapture}
@@ -4024,7 +4237,7 @@ function App() {
 													<DropPicker
 														compact
 														value={strokeWidth}
-														options={[2, 4, 8, 14]}
+														options={[2, 4, 8]}
 														onChange={(v) => {
 															setStrokeWidth(v);
 															localStorage.setItem("ishot-stroke-w", String(v));
@@ -4160,6 +4373,44 @@ function App() {
 													>
 														U
 													</button>
+													{(
+														[
+															["left", AlignLeft],
+															["center", AlignCenter],
+															["right", AlignRight],
+														] as const
+													).map(([al, Ic]) => {
+														const cur =
+															annotations.find(
+																(a) =>
+																	a.id === (editingTextId ?? selectedAnnotation) &&
+																	a.type === "textbox",
+																)?.align ?? "left";
+														const on = cur === al;
+														return (
+															<button
+																key={al}
+																onMouseDown={(e) => e.preventDefault()}
+																onClick={() => setTextAlign(al)}
+																title={`Align ${al}`}
+																style={{
+																	width: 28,
+																	height: 28,
+																	padding: 0,
+																	border: "none",
+																	borderRadius: "var(--radius-s)",
+																	cursor: "pointer",
+																	background: on ? "var(--accent)" : "transparent",
+																	color: on ? "#fff" : "var(--label)",
+																	display: "flex",
+																	alignItems: "center",
+																	justifyContent: "center",
+																}}
+															>
+																<ToolIcon icon={Ic} />
+															</button>
+														);
+													})}
 													<div
 														style={{
 															width: 1,
@@ -4434,7 +4685,7 @@ function App() {
 						>
 							<div
 								style={{
-									background: "rgba(255,255,255,0.97)",
+									background: "var(--surface)",
 									borderRadius: 8,
 									padding: 12,
 									boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
@@ -4452,7 +4703,7 @@ function App() {
 										alignItems: "center",
 										gap: 8,
 										fontSize: 11,
-										color: "rgba(0,0,0,0.55)",
+										color: "var(--label-2)",
 										fontWeight: 600,
 									}}
 								>
@@ -4489,7 +4740,7 @@ function App() {
 									style={{
 										fontSize: 13,
 										lineHeight: 1.6,
-										color: "#222",
+										color: "var(--label)",
 										whiteSpace: "pre-wrap",
 										wordBreak: "break-word",
 										userSelect: "text",
@@ -4500,7 +4751,7 @@ function App() {
 									}}
 								>
 									{translateLoading && translateSource ? (
-										<span style={{ color: "rgba(0,0,0,0.4)" }}>
+										<span style={{ color: "var(--label-3)" }}>
 											Translating…
 										</span>
 									) : (
@@ -4863,27 +5114,30 @@ function ThinkingLabel() {
 
 function ToolBtn({ children, active, onClick, style, title }: any) {
 	return (
-		<button
-			onClick={onClick}
-			title={title}
-			style={{
-				width: "var(--ctrl)",
-				height: "var(--ctrl)",
-				padding: 0,
-				border: "none",
-				borderRadius: "var(--radius-s)",
-				background: active ? "var(--accent)" : "transparent",
-				color: active ? "#fff" : "var(--label)",
-				cursor: "pointer",
-				fontSize: 14,
-				display: "flex",
-				alignItems: "center",
-				justifyContent: "center",
-				...style,
-			}}
-		>
-			{children}
-		</button>
+		<span className="tt-wrap">
+			<button
+				onClick={onClick}
+				aria-label={title}
+				style={{
+					width: "var(--ctrl)",
+					height: "var(--ctrl)",
+					padding: 0,
+					border: "none",
+					borderRadius: "var(--radius-s)",
+					background: active ? "var(--accent)" : "transparent",
+					color: active ? "#fff" : "var(--label)",
+					cursor: "pointer",
+					fontSize: 14,
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "center",
+					...style,
+				}}
+			>
+				{children}
+			</button>
+			{title && <span className="tt">{title}</span>}
+		</span>
 	);
 }
 
@@ -4989,46 +5243,6 @@ function DropPicker({
 	);
 }
 
-/**
- * Toolbar icon with MEASURED optical sizing.
- *
- * lucide icons live on a 24-unit grid but each fills a different fraction of it
- * (Square ≈ full, CaseSensitive letters / Fullscreen brackets leave padding), so
- * the same `size` renders different visual sizes. Instead of hand-tuning each
- * one, we measure the rendered glyph's bounding box (getBBox, in viewBox units)
- * and scale the icon so its glyph fills `box` px — every toolbar icon ends up
- * the same visual size automatically. `absoluteStrokeWidth` keeps the stroke a
- * constant 2px regardless of that scale.
- */
-function ToolIcon({ icon: Icon, box = 18 }: { icon: LucideIcon; box?: number }) {
-	const ref = useRef<HTMLSpanElement>(null);
-	const [size, setSize] = useState(box);
-	useLayoutEffect(() => {
-		const svg = ref.current?.querySelector("svg") as SVGGraphicsElement | null;
-		if (!svg) return;
-		try {
-			const bb = svg.getBBox(); // viewBox units (Phosphor: 0..256)
-			const m = Math.max(bb.width, bb.height);
-			if (m > 0) setSize((box * 256) / m);
-		} catch {
-			/* getBBox throws if not laid out yet — keep default size */
-		}
-	}, [box]);
-	return (
-		<span
-			ref={ref}
-			style={{
-				width: box,
-				height: box,
-				display: "inline-flex",
-				alignItems: "center",
-				justifyContent: "center",
-			}}
-		>
-			<Icon size={size} weight="regular" />
-		</span>
-	);
-}
 
 // Mini preview icons for the two arrow styles.
 function ArrowStyleIcon({ style, on }: { style: 1 | 2; on: boolean }) {
@@ -5308,8 +5522,8 @@ function LangPicker({
 					fontSize: 12,
 					padding: "0 8px",
 					cursor: disabled ? "default" : "pointer",
-					background: open ? "#007aff" : "rgba(0,0,0,0.06)",
-					color: open ? "#fff" : "#1c1c1e",
+					background: open ? "var(--accent)" : "var(--fill)",
+					color: open ? "#fff" : "var(--label)",
 					display: "flex",
 					alignItems: "center",
 					justifyContent: "space-between",
@@ -5329,7 +5543,7 @@ function LangPicker({
 						top: "100%",
 						[align]: 0,
 						marginTop: 4,
-						background: "rgba(255,255,255,0.98)",
+						background: "var(--elev)",
 						borderRadius: 6,
 						padding: 3,
 						boxShadow: "0 6px 24px rgba(0,0,0,0.22)",
@@ -5355,8 +5569,8 @@ function LangPicker({
 								borderRadius: 4,
 								fontSize: 12,
 								padding: "0 10px",
-								background: opt.value === value ? "#007aff" : "transparent",
-								color: opt.value === value ? "#fff" : "#1c1c1e",
+								background: opt.value === value ? "var(--accent)" : "transparent",
+								color: opt.value === value ? "#fff" : "var(--label)",
 								cursor: "pointer",
 								fontFamily: "inherit",
 								display: "flex",

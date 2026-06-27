@@ -11,3 +11,4 @@ pub mod ai_chat;
 pub mod appearance;
 pub mod hud;
 pub mod recorder;
+pub mod pin;

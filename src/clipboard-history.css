@@ -11,7 +11,7 @@ html, body, #root {
   height: 100%;
   background: transparent;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  color: rgba(255, 255, 255, 0.95);
+  color: var(--ink-95);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
   user-select: none;
@@ -23,6 +23,7 @@ html, body, #root {
   height: 100%;
   display: flex;
   flex-direction: column;
+  background: var(--panel-bg);
 }
 
 /* Spotlight-style header: big search input, no border below — divider
@@ -42,14 +43,14 @@ html, body, #root {
   font-weight: 400;
   border: none;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.10);
-  color: rgba(255, 255, 255, 0.98);
+  background: var(--ink-10);
+  color: var(--ink-98);
   outline: none;
   font-family: inherit;
   letter-spacing: -0.01em;
 }
-.ch-search::placeholder { color: rgba(255, 255, 255, 0.32); }
-.ch-search:focus { background: rgba(255, 255, 255, 0.14); }
+.ch-search::placeholder { color: var(--ink-32); }
+.ch-search:focus { background: var(--ink-14); }
 
 .ch-icon-btn {
   width: 32px;
@@ -61,12 +62,12 @@ html, body, #root {
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--ink-60);
   cursor: pointer;
   padding: 0;
   flex-shrink: 0;
 }
-.ch-icon-btn:hover { background: rgba(255, 255, 255, 0.10); color: rgba(255, 255, 255, 0.95); }
+.ch-icon-btn:hover { background: var(--ink-10); color: var(--ink-95); }
 .ch-icon-btn.active { background: rgba(255, 204, 10, 0.20); color: #ffd60a; }
 
 .ch-list {
@@ -76,13 +77,13 @@ html, body, #root {
 }
 .ch-list::-webkit-scrollbar { width: 6px; }
 .ch-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--ink-14);
   border-radius: 3px;
 }
-.ch-list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
+.ch-list::-webkit-scrollbar-thumb:hover { background: var(--ink-25); }
 
 .ch-empty {
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--ink-40);
   font-size: 14px;
   text-align: center;
   padding: 80px 12px;
@@ -98,7 +99,7 @@ html, body, #root {
   margin-bottom: 2px;
   transition: background 80ms;
 }
-.ch-card:hover { background: rgba(255, 255, 255, 0.07); }
+.ch-card:hover { background: var(--ink-07); }
 .ch-card.selected {
   background: rgba(10, 132, 255, 0.32);
 }
@@ -112,7 +113,7 @@ html, body, #root {
   border: none;
   border-radius: 0;
   background: transparent;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--ink-55);
   cursor: pointer;
   font-size: 16px;
   line-height: 22px;
@@ -123,7 +124,7 @@ html, body, #root {
 }
 .ch-card:hover .ch-delete,
 .ch-card.selected .ch-delete { opacity: 1; }
-.ch-delete:hover { color: rgba(255, 255, 255, 1); }
+.ch-delete:hover { color: var(--ink-100); }
 
 .ch-img {
   max-width: 100%;
@@ -141,6 +142,6 @@ html, body, #root {
   word-break: break-word;
   max-height: 160px;
   overflow: hidden;
-  color: rgba(255, 255, 255, 0.95);
+  color: var(--ink-95);
   line-height: 1.45;
 }

@@ -15,6 +15,18 @@ fn esc_shortcut() -> Shortcut {
     Shortcut::new(None, Code::Escape)
 }
 
+/// The user-configurable "finish scroll capture" shortcut (default Enter),
+/// built from settings. None only if it collides with Esc (already handled).
+fn finish_shortcut() -> Option<Shortcut> {
+    let s = crate::services::settings::load_cached();
+    let sc = crate::spec_to_shortcut(&s.shortcuts.scroll_finish);
+    if sc == esc_shortcut() {
+        None
+    } else {
+        Some(sc)
+    }
+}
+
 pub fn register_scroll_esc(app: &AppHandle) {
     let app2 = app.clone();
     if let Err(e) = app
@@ -27,10 +39,27 @@ pub fn register_scroll_esc(app: &AppHandle) {
     {
         eprintln!("[scroll] esc shortcut register failed: {}", e);
     }
+    // Configurable finish key (default Enter) → same finish/copy flow as Esc.
+    if let Some(fin) = finish_shortcut() {
+        let app3 = app.clone();
+        if let Err(e) = app
+            .global_shortcut()
+            .on_shortcut(fin, move |_app, _sc, event| {
+                if event.state == ShortcutState::Pressed {
+                    let _ = app3.emit("scroll-esc", ());
+                }
+            })
+        {
+            eprintln!("[scroll] finish shortcut register failed: {}", e);
+        }
+    }
 }
 
 pub fn unregister_scroll_esc(app: &AppHandle) {
     let _ = app.global_shortcut().unregister(esc_shortcut());
+    if let Some(fin) = finish_shortcut() {
+        let _ = app.global_shortcut().unregister(fin);
+    }
 }
 
 /// Prepare scroll capture: store the selection rect so the scroll panel can start later

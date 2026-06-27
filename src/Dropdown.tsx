@@ -35,47 +35,41 @@ export default function Dropdown({
 	options,
 	onChange,
 	minWidth,
+	width,
+	fill,
 	openUp,
 	onOpenChange,
-	light,
 	maxHeight = 260,
 }: {
 	value: string;
 	options: DropdownOption[];
 	onChange: (v: string) => void;
 	minWidth?: number;
+	/** Fixed trigger width (px) — use to align a group of dropdowns to one size.
+	 *  Omitted = size to the selected value. */
+	width?: number;
+	/** Stretch to fill the row (e.g. long model ids that shouldn't be clipped). */
+	fill?: boolean;
 	/** Open the menu above the trigger (for bars pinned to the screen bottom). */
 	openUp?: boolean;
 	/** Notified when the menu opens/closes (e.g. to resize a tiny host window). */
 	onOpenChange?: (open: boolean) => void;
-	/** Light theme — matches the app's capture toolbar (uses styles.css tokens). */
-	light?: boolean;
 	/** Cap the menu height so a long list scrolls instead of overflowing its
 	 *  host window (e.g. the fixed-height Settings panel). */
 	maxHeight?: number;
 }) {
-	// Theme: light reuses the app toolbar tokens (styles.css); dark matches HUD.
-	const t = light
-		? {
-				trigBg: "rgba(0,0,0,0.05)",
-				trigBgOpen: "var(--hover)",
-				text: "var(--label)",
-				menuBg: "var(--surface)",
-				menuShadow: "var(--shadow-pop)",
-				itemText: "var(--label)",
-				itemHover: "var(--hover)",
-				selBg: "var(--accent)",
-			}
-		: {
-				trigBg: "rgba(255,255,255,0.1)",
-				trigBgOpen: "rgba(255,255,255,0.16)",
-				text: "rgba(255,255,255,0.98)",
-				menuBg: "rgba(44,44,46,0.98)",
-				menuShadow: "0 10px 30px rgba(0,0,0,0.5)",
-				itemText: "rgba(255,255,255,0.9)",
-				itemHover: "rgba(255,255,255,0.1)",
-				selBg: "rgba(10,132,255,0.9)",
-			};
+	// Theme-aware via the shared token contract (theme.css) — works in light
+	// and dark; the host window must import theme.css (Settings does).
+	const t = {
+		trigBg: "var(--fill)",
+		trigBgOpen: "var(--hover)",
+		text: "var(--label)",
+		menuBg: "var(--elev)",
+		menuShadow: "0 10px 30px rgba(0,0,0,0.28)",
+		itemText: "var(--label)",
+		itemHover: "var(--hover)",
+		selBg: "var(--accent)",
+	};
 	const [open, setOpen] = useState(false);
 	const [pos, setPos] = useState<{
 		left: number;
@@ -135,7 +129,17 @@ export default function Dropdown({
 	return (
 		<div
 			ref={ref}
-			style={{ position: "relative", flex: 1, minWidth: minWidth ?? 0 }}
+			style={{
+				position: "relative",
+				// `fill` → take the whole row (long values not clipped). `width` →
+				// fixed size (align a group). Else size to the selected value like a
+				// macOS pop-up button (no full-row stretch).
+				display: fill ? "flex" : "inline-flex",
+				flex: fill ? 1 : undefined,
+				width: fill ? "100%" : width,
+				minWidth: fill ? 0 : (width ?? minWidth ?? 88),
+				maxWidth: "100%",
+			}}
 		>
 			<button
 				ref={triggerRef}
@@ -188,7 +192,11 @@ export default function Dropdown({
 						top: pos.top,
 						bottom: pos.bottom,
 						left: pos.left,
-						width: pos.width,
+						// Menu grows to fit the longest option but never narrower than
+						// the (now content-sized) trigger.
+						minWidth: pos.width,
+						width: "max-content",
+						maxWidth: 360,
 						maxHeight: pos.maxH,
 						overflowY: "auto",
 						margin: 0,

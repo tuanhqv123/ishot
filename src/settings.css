@@ -10,7 +10,7 @@ html, body, #root {
   height: 100%;
   background: transparent;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  color: rgba(255, 255, 255, 0.95);
+  color: var(--ink-95);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
   user-select: none;
@@ -22,11 +22,13 @@ html, body, #root {
   height: 100%;
   display: flex;
   flex-direction: column;
+  /* transparent in dark (native HudWindow blur shows); opaque light in light */
+  background: var(--panel-bg);
 }
 
 .st-loading {
   padding: 40px;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--ink-50);
   font-size: 13px;
 }
 
@@ -47,13 +49,13 @@ html, body, #root {
 }
 .st-body::-webkit-scrollbar { width: 6px; }
 .st-body::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--ink-14);
   border-radius: 3px;
 }
 
 .st-section {
   padding: 12px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--ink-08);
 }
 .st-section:last-child { border-bottom: none; }
 
@@ -62,7 +64,7 @@ html, body, #root {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--ink-50);
   margin-bottom: 10px;
 }
 
@@ -76,13 +78,13 @@ html, body, #root {
 
 .st-label {
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.88);
+  color: var(--ink-88);
   flex-shrink: 0;
   min-width: 140px;
 }
 .st-hint {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--ink-40);
   margin-top: 2px;
   font-weight: 400;
 }
@@ -94,18 +96,62 @@ html, body, #root {
   font-size: 13px;
   border: none;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.10);
-  color: rgba(255, 255, 255, 0.98);
+  background: var(--ink-10);
+  color: var(--ink-98);
   outline: none;
   font-family: inherit;
   min-width: 0;
 }
-.st-input:focus { background: rgba(255, 255, 255, 0.16); }
-.st-input::placeholder { color: rgba(255, 255, 255, 0.32); }
+.st-input:focus { background: var(--ink-16); }
+.st-input::placeholder { color: var(--ink-32); }
 
 .st-input-num {
   flex: 0 0 80px;
   text-align: right;
+}
+
+/* API key: input (with show/hide eye inside) + a success hint line below. */
+.st-key-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.st-key-hint {
+  font-size: 11px;
+  font-weight: 500;
+  color: #30d158; /* systemGreen */
+}
+.st-key-field {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+.st-key-field .st-input {
+  width: 100%;
+  padding-right: 34px; /* room for the eye */
+}
+.st-key-eye {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-55);
+  cursor: pointer;
+}
+.st-key-eye:hover {
+  background: var(--ink-10);
+  color: var(--ink-95);
 }
 
 .st-key-row {
@@ -122,22 +168,22 @@ html, body, #root {
   gap: 4px;
   height: 28px;
   padding: 0 10px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--ink-08);
   border: 1px solid transparent;
   border-radius: 6px;
   cursor: pointer;
   font-family: inherit;
-  color: rgba(255, 255, 255, 0.95);
+  color: var(--ink-95);
   justify-content: flex-end;
 }
-.st-shortcut:hover { background: rgba(255, 255, 255, 0.12); }
+.st-shortcut:hover { background: var(--ink-12); }
 .st-shortcut.recording {
   border-color: rgba(10, 132, 255, 0.7);
   background: rgba(10, 132, 255, 0.15);
 }
 .st-shortcut-hint {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--ink-70);
 }
 
 .st-key {
@@ -147,11 +193,11 @@ html, body, #root {
   min-width: 22px;
   height: 22px;
   padding: 0 6px;
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--ink-16);
   border-radius: 4px;
   font-size: 12px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.98);
+  color: var(--ink-98);
 }
 
 /* About / donate — centered block. */
@@ -170,7 +216,7 @@ html, body, #root {
   font: inherit;
   font-size: 15px;
   font-weight: 700;
-  color: rgba(255, 255, 255, 0.95);
+  color: var(--ink-95);
   cursor: pointer;
 }
 .st-about-name:hover {
@@ -178,27 +224,28 @@ html, body, #root {
   text-decoration: underline;
 }
 .st-about-tagline {
-  max-width: 320px;
+  /* Wide enough to keep the one-sentence tagline on a single line. */
+  max-width: 460px;
   font-size: 12px;
   line-height: 1.5;
   font-style: italic;
-  color: rgba(255, 255, 255, 0.92);
+  color: var(--ink-92);
 }
 /* Plain, neutral "Support" button — no colour, no icon. */
 .st-support-btn {
   height: 30px;
   padding: 0 16px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--ink-18);
   border-radius: 8px;
   background: transparent;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--ink-85);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
 }
 .st-support-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.32);
+  background: var(--ink-08);
+  border-color: var(--ink-32);
 }
 .st-donate-panel {
   display: flex;
@@ -214,16 +261,16 @@ html, body, #root {
 .st-donate-opt {
   height: 32px;
   padding: 0 18px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--ink-16);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(255, 255, 255, 0.92);
+  background: var(--ink-06);
+  color: var(--ink-92);
   font-size: 13px;
   cursor: pointer;
 }
 .st-donate-opt:hover {
-  background: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.3);
+  background: var(--ink-12);
+  border-color: var(--ink-30);
 }
 .st-donate-opt.active {
   background: rgba(10, 132, 255, 0.9);
@@ -245,12 +292,12 @@ html, body, #root {
 }
 .st-donate-vn-note {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--ink-60);
 }
 
 .st-footer {
   padding: 12px 20px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--ink-08);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -259,7 +306,25 @@ html, body, #root {
 
 .st-status {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--ink-55);
+}
+
+/* Inline "update available" notice + button, bottom-left of the footer. */
+.st-update {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.st-update-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-95);
+}
+
+/* Support + Report issue side by side. */
+.st-about-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .st-footer-buttons {
@@ -274,12 +339,12 @@ html, body, #root {
   font-size: 13px;
   border: none;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.12);
-  color: rgba(255, 255, 255, 0.95);
+  background: var(--ink-12);
+  color: var(--ink-95);
   cursor: pointer;
   font-family: inherit;
 }
-.st-btn:hover { background: rgba(255, 255, 255, 0.18); }
+.st-btn:hover { background: var(--ink-18); }
 .st-btn:disabled { opacity: 0.4; cursor: default; }
 .st-btn-primary {
   background: rgba(10, 132, 255, 0.85);
@@ -289,7 +354,7 @@ html, body, #root {
 .st-btn-ghost {
   background: transparent;
 }
-.st-btn-ghost:hover { background: rgba(255, 255, 255, 0.10); }
+.st-btn-ghost:hover { background: var(--ink-10); }
 
 /* Model dropdown — visible custom list that replaces the unreliable
    native <datalist>. Anchored under the Model input, clamps to ~220px
@@ -311,30 +376,30 @@ html, body, #root {
   list-style: none;
   margin: 0;
   padding: 4px;
-  background: rgba(40, 40, 44, 0.96);
+  background: var(--elev);
   backdrop-filter: blur(20px) saturate(160%);
   -webkit-backdrop-filter: blur(20px) saturate(160%);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--ink-08);
   border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
   z-index: 10;
 }
 .st-dropdown::-webkit-scrollbar { width: 6px; }
 .st-dropdown::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--ink-14);
   border-radius: 3px;
 }
 .st-dropdown-item {
   padding: 6px 10px;
   border-radius: 4px;
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.92);
+  color: var(--ink-92);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.st-dropdown-item:hover { background: rgba(255, 255, 255, 0.10); }
+.st-dropdown-item:hover { background: var(--ink-10); }
 .st-dropdown-item.selected {
   background: rgba(10, 132, 255, 0.30);
   color: white;
@@ -356,7 +421,7 @@ html, body, #root {
   padding: 0;
   border: none;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--ink-16);
   cursor: pointer;
   transition: background 0.15s ease;
 }
@@ -395,13 +460,13 @@ html, body, #root {
   width: 30px;
   height: 30px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--ink-16);
   border-radius: 7px;
   cursor: pointer;
   background-size: cover;
   background-position: center;
 }
-.st-swatch:hover { border-color: rgba(255, 255, 255, 0.4); }
+.st-swatch:hover { border-color: var(--ink-40); }
 .st-swatch.selected {
   border-color: rgba(10, 132, 255, 1);
   box-shadow: 0 0 0 2px rgba(10, 132, 255, 0.5);
@@ -421,7 +486,7 @@ html, body, #root {
 .st-bg-path {
   flex: 1;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--ink-60);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -453,7 +518,7 @@ html, body, #root {
   height: 58px;
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--ink-12);
   background-size: cover;
   background-position: center;
 }
@@ -521,7 +586,7 @@ html, body, #root {
   margin: 6px 0;
   border-radius: 10px;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--ink-12);
   background-size: cover;
   background-position: center;
 }
@@ -576,14 +641,14 @@ html, body, #root {
   height: 30px;
   padding: 0 8px;
   border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  border: 1px solid var(--ink-16);
+  background: var(--ink-08);
+  color: var(--ink-95);
   font-size: 13px;
   cursor: pointer;
   outline: none;
 }
-.st-select:hover { border-color: rgba(255, 255, 255, 0.4); }
+.st-select:hover { border-color: var(--ink-40); }
 
 /* Sliders (left) + live preview tile (right), side by side — never wraps. */
 .st-bg-preview-row {
@@ -604,6 +669,6 @@ html, body, #root {
   align-items: center;
   justify-content: space-between;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--ink-85);
 }
 .st-slider-label .st-hint { margin: 0; }

@@ -11,18 +11,15 @@ export interface GradientPreset {
 }
 
 export const GRADIENT_PRESETS: GradientPreset[] = [
-	// Dark — kept visually distinct from each other.
+	// Curated — each distinct and clean, none muddy. Dark → cool → warm → fresh.
 	{ id: "midnight", label: "Midnight", from: "#232526", to: "#414345" }, // graphite
-	{ id: "royal", label: "Royal", from: "#0f2027", to: "#2c5364" }, // deep teal-navy
-	{ id: "plum", label: "Plum", from: "#41295a", to: "#2f0743" }, // dark purple
-	// Light
+	{ id: "ocean", label: "Ocean", from: "#2193b0", to: "#6dd5ed" }, // cyan blue
+	{ id: "lush", label: "Lush", from: "#654ea3", to: "#eaafc8" }, // purple → pink
+	{ id: "sunset", label: "Sunset", from: "#ff7e5f", to: "#feb47b" }, // warm orange
 	{ id: "peach", label: "Peach", from: "#ffecd2", to: "#fcb69f" },
 	{ id: "sky", label: "Sky", from: "#a1c4fd", to: "#c2e9fb" },
-	{ id: "daylight", label: "Daylight", from: "#e0eafc", to: "#cfdef3" },
-	// Pastel
-	{ id: "lavender", label: "Lavender", from: "#a18cd1", to: "#fbc2eb" },
 	{ id: "blush", label: "Blush", from: "#ee9ca7", to: "#ffdde1" },
-	{ id: "mint", label: "Mint", from: "#d4fc79", to: "#96e6a1" },
+	{ id: "aqua", label: "Aqua", from: "#43e97b", to: "#38f9d7" }, // fresh mint-teal
 ];
 
 export function gradientById(id: string): GradientPreset {

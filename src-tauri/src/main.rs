@@ -646,6 +646,7 @@ fn main() {
             commands::window::hide_scroll_border,
             commands::file::copy_to_clipboard,
             commands::file::copy_image_rgba,
+            commands::pin::pin_image,
             commands::file::copy_text_to_clipboard,
             commands::file::save_to_file,
             commands::ocr::perform_ocr,
@@ -673,6 +674,9 @@ fn main() {
             commands::settings::clear_api_key,
             commands::settings::open_settings,
             commands::settings::get_app_version,
+            commands::settings::get_os_version,
+            commands::settings::check_update,
+            commands::settings::install_update,
             commands::settings::get_autostart,
             commands::settings::set_autostart,
             commands::ai_chat::ai_chat_stream,
@@ -717,6 +721,8 @@ fn str_to_code(s: &str) -> Code {
         "F5" => Code::F5, "F6" => Code::F6, "F7" => Code::F7, "F8" => Code::F8,
         "F9" => Code::F9, "F10" => Code::F10, "F11" => Code::F11, "F12" => Code::F12,
         "Space" => Code::Space,
+        "Enter" | "Return" => Code::Enter,
+        "Tab" => Code::Tab,
         _ => Code::KeyA,
     }
 }

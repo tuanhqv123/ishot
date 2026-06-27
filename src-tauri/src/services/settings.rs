@@ -24,6 +24,17 @@ pub struct ShortcutSpec {
 pub struct Shortcuts {
     pub capture: ShortcutSpec,
     pub clipboard: ShortcutSpec,
+    /// Key that finishes a scroll capture (stop + copy). Active only while a
+    /// scroll capture is running. Default: Enter (no modifiers).
+    #[serde(default = "default_scroll_finish")]
+    pub scroll_finish: ShortcutSpec,
+}
+
+fn default_scroll_finish() -> ShortcutSpec {
+    ShortcutSpec {
+        modifiers: 0,
+        key: "Enter".to_string(),
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -93,6 +104,13 @@ pub struct Settings {
     pub appearance: AppearanceConfig,
     #[serde(default)]
     pub recording: RecordingConfig,
+    /// UI theme: "system" (follow macOS appearance) | "light" | "dark".
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "system".to_string()
 }
 
 impl Default for Settings {
@@ -107,6 +125,7 @@ impl Default for Settings {
                     modifiers: 1 | 2, // META | SHIFT
                     key: "V".to_string(),
                 },
+                scroll_finish: default_scroll_finish(),
             },
             retention: 10,
             ai: AiConfig {
@@ -115,6 +134,7 @@ impl Default for Settings {
             },
             appearance: Default::default(),
             recording: Default::default(),
+            theme: default_theme(),
         }
     }
 }

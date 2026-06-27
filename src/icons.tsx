@@ -34,7 +34,21 @@ export {
 	XIcon as X,
 	PauseIcon as Pause,
 	PlayIcon as Play,
+	PushPinIcon as Pin, // pin-to-screen
+	TextAlignLeftIcon as AlignLeft,
+	TextAlignCenterIcon as AlignCenter,
+	TextAlignRightIcon as AlignRight,
+	EyeIcon as Eye,
+	EyeSlashIcon as EyeOff,
+	CheckCircleIcon as CheckCircle,
 } from "@phosphor-icons/react";
 
 // Component type for props that accept "any icon" (was lucide's LucideIcon).
 export type { Icon as LucideIcon } from "@phosphor-icons/react";
+
+// Scroll capture uses lucide's "image-down" (a picture with a down arrow) —
+// Phosphor has no equivalent. ToolIcon reads each icon's viewBox, so a lucide
+// glyph optically matches the Phosphor ones. Cast to the shared icon type.
+import { ImageDown as LucideImageDown } from "lucide-react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
+export const ImageDown = LucideImageDown as unknown as PhosphorIcon;

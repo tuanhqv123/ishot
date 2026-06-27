@@ -1,14 +1,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import RecordingPreview from "./RecordingPreview";
-import "./theme.css";
+import Pin from "./Pin";
 import "./tailwind.css";
-import { initTheme } from "./theme";
-
-initTheme();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
 	<React.StrictMode>
-		<RecordingPreview />
+		<Pin />
 	</React.StrictMode>,
 );

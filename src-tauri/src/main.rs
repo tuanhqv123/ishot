@@ -404,7 +404,10 @@ fn main() {
 
             #[cfg(target_os = "macos")]
             {
+                // Ask for ALL permissions at launch (clean screen) so a recording
+                // never interrupts an active capture/selection with a prompt.
                 request_screen_recording_permission();
+                request_av_permissions();
             }
 
             // Setup overlay window on primary display
@@ -797,6 +800,32 @@ fn request_screen_recording_permission() {
             let granted = CGRequestScreenCaptureAccess();
             println!("Permission request result: {}", granted);
         }
+    }
+}
+
+/// Request Camera + Microphone access up front (at launch, on a clean screen)
+/// so the recording feature never has to interrupt an in-progress capture with a
+/// permission prompt. macOS only actually shows the dialog the FIRST time (status
+/// NotDetermined); later launches no-op. The completion block is leaked on
+/// purpose — it must outlive the async callback (one-time startup cost).
+#[cfg(target_os = "macos")]
+fn request_av_permissions() {
+    use block::ConcreteBlock;
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::runtime::BOOL;
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        // AVMediaTypeVideo = "vide", AVMediaTypeAudio = "soun".
+        let video: id = NSString::alloc(nil).init_str("vide");
+        let audio: id = NSString::alloc(nil).init_str("soun");
+        let cb = ConcreteBlock::new(|_granted: BOOL| {});
+        let cb = cb.copy();
+        let _: () = msg_send![class!(AVCaptureDevice),
+            requestAccessForMediaType: video completionHandler: &*cb];
+        let _: () = msg_send![class!(AVCaptureDevice),
+            requestAccessForMediaType: audio completionHandler: &*cb];
+        std::mem::forget(cb);
     }
 }
 
